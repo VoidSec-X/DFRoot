@@ -351,7 +351,7 @@ jobs:
           if source.count(legacy) != 1:
               raise SystemExit("xmit_osdep.h: expected original legacy TX prototype exactly once")
           if prototype not in source:
-              source = source.replace(legacy, legacy + "\\n" + prototype, 1)
+              source = source.replace(legacy, legacy + "\n" + prototype, 1)
           p.write_text(source)
 
           p = Path("os_dep/linux/xmit_linux.c")
@@ -365,7 +365,7 @@ jobs:
           if source.count(legacy_def) != 1:
               raise SystemExit("xmit_linux.c: expected original legacy TX definition exactly once")
           if "rtl8188eu_ndo_start_xmit(" not in source:
-              source = source.rstrip() + "\\n\\n" + wrapper + "\\n"
+              source = source.rstrip() + "\n\n" + wrapper + "\n"
           p.write_text(source)
 
           # Both physical and virtual station interfaces use the typed callback.
@@ -455,7 +455,7 @@ jobs:
             exit 1
           fi
           echo "Verified rtl8188eu_ndo_start_xmit KCFI type ID: $KCFI_ID"
-          cp 8188eu.ko "$GITHUB_WORKSPACE/out/${{ matrix.kmi }}-testmode-y.ko"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
 
