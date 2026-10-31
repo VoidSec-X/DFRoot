@@ -191,6 +191,15 @@ jobs:
           source = source.replace(old, new, 1)
           p.write_text(source)
 
+          # Clang 6.6 diagnoses redundant parentheses around this comparison.
+          p = Path("hal/rtl8188e/usb/usb_halinit.c")
+          source = p.read_text()
+          old = "if ((IS_FULL_SPEED_USB(Adapter))"
+          new = "if (IS_FULL_SPEED_USB(Adapter)"
+          if source.count(old) != 1:
+              raise SystemExit("usb_halinit.c: expected exactly one redundant-parentheses condition")
+          p.write_text(source.replace(old, new, 1))
+
           # Clang 6.6 treats the intentional-looking spinlock switch fallthrough
           # as an error. These cases have no shared cleanup; terminate explicitly.
           p = Path("core/rtw_odm.c")
