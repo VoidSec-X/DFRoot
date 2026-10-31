@@ -403,51 +403,47 @@ jobs:
               elif source.count(new) != 1:
                   raise SystemExit(f"{path}: callback signature not found or ambiguous")
               p.write_text(source)
-          # Fix the TX tasklet callback reported by the device's KCFI panic.
-          # tasklet_init expects void (*)(unsigned long); the upstream TX callback
-          # was declared/defined as void (*)(void *) and registered via a cast.
-          # Make declaration, definition and registration use the native ABI.
+          # Fix the TX tasklet callback reported by the device's CFI panic.
+          # tasklet_init() requires void (*)(unsigned long). Upstream registered
+          # a void (*)(void *) function through an incompatible cast.
           p = Path("include/rtl8188e_xmit.h")
           source = p.read_text()
-          old_decl = "void rtl8188eu_xmit_tasklet(void *priv);"
-          new_decl = "void rtl8188eu_xmit_tasklet(unsigned long priv);"
-          if source.count(old_decl) == 1:
-              source = source.replace(old_decl, new_decl, 1)
-          elif source.count(new_decl) != 1:
-              raise SystemExit("rtl8188e_xmit.h: TX tasklet declaration not found exactly once")
-          p.write_text(source)
+          old = "void rtl8188eu_xmit_tasklet(void *priv);"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv);"
+          if source.count(old) != 1:
+              raise SystemExit("rtl8188e_xmit.h: TX tasklet prototype not found exactly once")
+          p.write_text(source.replace(old, new, 1))
 
           p = Path("hal/rtl8188e/usb/rtl8188eu_xmit.c")
           source = p.read_text()
-          old_init = """tasklet_init(&pxmitpriv->xmit_tasklet,
+          old = """tasklet_init(&pxmitpriv->xmit_tasklet,
           		     (void(*)(unsigned long))rtl8188eu_xmit_tasklet,
           		     (unsigned long)padapter);"""
-          new_init = """tasklet_init(&pxmitpriv->xmit_tasklet,
+          new = """tasklet_init(&pxmitpriv->xmit_tasklet,
           		     rtl8188eu_xmit_tasklet,
           		     (unsigned long)padapter);"""
-          if source.count(old_init) == 1:
-              source = source.replace(old_init, new_init, 1)
-          elif source.count(new_init) != 1:
-              raise SystemExit("rtl8188eu_xmit.c: TX tasklet_init registration not found exactly once")
-          p.write_text(source)
+          if source.count(old) != 1:
+              raise SystemExit("rtl8188eu_xmit.c: TX tasklet registration not found exactly once")
+          p.write_text(source.replace(old, new, 1))
 
-          p = Path("hal/rtl8188e/rtl8188e_xmit.c")
+          # The TX tasklet body is in usb_ops_linux.c (not rtl8188e_xmit.c).
+          p = Path("hal/rtl8188e/usb/usb_ops_linux.c")
           source = p.read_text()
-          old_impl = "void rtl8188eu_xmit_tasklet(void *priv)"
-          new_impl = "void rtl8188eu_xmit_tasklet(unsigned long priv)"
-          if source.count(old_impl) == 1:
-              source = source.replace(old_impl, new_impl, 1)
-          elif source.count(new_impl) != 1:
-              raise SystemExit("rtl8188e_xmit.c: TX tasklet implementation not found exactly once")
-          old_cast = "_adapter *padapter = (_adapter *)priv;"
-          new_cast = "_adapter *padapter = (_adapter *)(uintptr_t)priv;"
-          if old_cast in source:
-              source = source.replace(old_cast, new_cast, 1)
-          elif new_cast not in source:
-              raise SystemExit("rtl8188e_xmit.c: TX tasklet adapter conversion not found")
+          old = "void rtl8188eu_xmit_tasklet(void *priv)"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv)"
+          if source.count(old) != 1:
+              raise SystemExit("usb_ops_linux.c: TX tasklet implementation not found exactly once")
+          source = source.replace(old, new, 1)
+          old = "_adapter *padapter = (_adapter *)priv;"
+          new = "_adapter *padapter = (_adapter *)(uintptr_t)priv;"
+          if source.count(old) < 1:
+              raise SystemExit("usb_ops_linux.c: TX tasklet adapter conversion not found")
+          source = source.replace(old, new, 1)
           p.write_text(source)
 
-          # TX callback ABI check, alongside the existing RX tasklet check.
+          # Verify the TX callback that actually faulted on-device. Its KCFI
+          # type ID must match the legacy tasklet_init callback type, 0xaecee44b.
+                    # TX callback ABI check, alongside the existing RX tasklet check.
                     # Linux 6.6 has both legacy tasklet_init(unsigned long) and
           # modern tasklet_setup(struct tasklet_struct *) callbacks.
           # This driver uses tasklet_init, so retain it and match its callback ABI.
