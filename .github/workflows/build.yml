@@ -431,15 +431,90 @@ jobs:
           install -m 0644 "$ANDROID_CFG" "$KDIR/include/net/cfg80211.h"
           test -s "$KDIR/include/net/cfg80211.h"
 
-          # Build only testmode-y, but require the DDK's generated kernel config
-          # to enable it. Never force a CONFIG_* value only for the external module:
-          # that would change cfg80211_ops layout without changing the running kernel.
-          KCONFIG_AUTO="$KDIR/include/generated/autoconf.h"
-          test -f "$KCONFIG_AUTO"
-          grep -q '^#define CONFIG_NL80211_TESTMODE 1$' "$KCONFIG_AUTO" || {
-            echo "::error::DDK kernel config is not CONFIG_NL80211_TESTMODE=y; refusing an ABI-mismatched module"
+          # The handset kernel has CONFIG_NL80211_TESTMODE=y. Align the DDK's
+          # actual Kconfig state (not just KCFLAGS/autoconf.h) before compiling,
+          # so cfg80211_ops has the same conditional members as the target kernel.
+          test -f "$KDIR/.config"
+          test -x "$KDIR/scripts/config"
+          "$KDIR/scripts/config" --file "$KDIR/.config" --enable NL80211_TESTMODE
+          make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
+          grep -q '^CONFIG_NL80211_TESTMODE=y
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+          test -s 8188eu.ko
+          llvm-readelf -h 8188eu.ko | grep -q 'AArch64'
+          llvm-readelf -p .modinfo 8188eu.ko | grep -q 'vermagic=6.6.127-4k'
+          llvm-nm -n 8188eu.ko | grep -q 'rtw_xmit_entry'
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          sha256sum "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+      - name: Upload RTL8188EUS.ko
+        if: matrix.kmi == 'android15-6.6'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtl8188eus-${{ matrix.kmi }}
+          path: out/8188eu-${{ matrix.kmi }}*.ko
+          if-no-files-found: error
+
+ "$KDIR/.config" || {
+            echo "::error::Kconfig did not retain CONFIG_NL80211_TESTMODE=y"
             exit 1
           }
+          KCONFIG_AUTO="$KDIR/include/generated/autoconf.h"
+          test -f "$KCONFIG_AUTO"
+          grep -q '^#define CONFIG_NL80211_TESTMODE 1
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+          test -s 8188eu.ko
+          llvm-readelf -h 8188eu.ko | grep -q 'AArch64'
+          llvm-readelf -p .modinfo 8188eu.ko | grep -q 'vermagic=6.6.127-4k'
+          llvm-nm -n 8188eu.ko | grep -q 'rtw_xmit_entry'
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          sha256sum "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+      - name: Upload RTL8188EUS.ko
+        if: matrix.kmi == 'android15-6.6'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtl8188eus-${{ matrix.kmi }}
+          path: out/8188eu-${{ matrix.kmi }}*.ko
+          if-no-files-found: error
+
+ "$KCONFIG_AUTO" || {
+            echo "::error::generated autoconf.h does not reflect CONFIG_NL80211_TESTMODE=y"
+            exit 1
+          }
+          grep -q '^CONFIG_NL80211_TESTMODE=y
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+          test -s 8188eu.ko
+          llvm-readelf -h 8188eu.ko | grep -q 'AArch64'
+          llvm-readelf -p .modinfo 8188eu.ko | grep -q 'vermagic=6.6.127-4k'
+          llvm-nm -n 8188eu.ko | grep -q 'rtw_xmit_entry'
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          sha256sum "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+      - name: Upload RTL8188EUS.ko
+        if: matrix.kmi == 'android15-6.6'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtl8188eus-${{ matrix.kmi }}
+          path: out/8188eu-${{ matrix.kmi }}*.ko
+          if-no-files-found: error
+
+ "$KDIR/include/config/auto.conf"
           mkdir -p "$GITHUB_WORKSPACE/out"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
