@@ -51,54 +51,60 @@ jobs:
           make -C "$KDIR" M="$PWD" clean
           find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
 
-          # Deterministic Android 16 Clang compatibility fixes.
+          # Android 16 Clang compatibility: turn legacy trailing arrays into
+          # C flexible array members and annotate the affected switch label.
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(path, old, new):
+          def patch_struct(path, struct_start, struct_end, field_pattern, replacement):
               p = Path(path)
               s = p.read_text()
-              n = s.count(old)
+              start = s.find(struct_start)
+              if start < 0:
+                  raise SystemExit(f"{path}: struct start not found")
+              end = s.find(struct_end, start)
+              if end < 0:
+                  raise SystemExit(f"{path}: struct end not found")
+              block = s[start:end]
+              block2, n = re.subn(field_pattern, replacement, block, count=1)
               if n != 1:
-                  raise SystemExit(f"{path}: expected 1 exact source match, got {n}")
-              p.write_text(s.replace(old, new, 1))
+                  raise SystemExit(f"{path}: trailing-array field match count={n}")
+              p.write_text(s[:start] + block2 + s[end:])
 
-          replace_once(
+          patch_struct(
               "include/ieee80211.h",
-              "struct ieee80211_info_element {\n\tu8 id;\n\tu8 len;\n\tu8 data[0];\n}",
-              "struct ieee80211_info_element {\n\tu8 id;\n\tu8 len;\n\tu8 data[];\n}"
+              "struct ieee80211_info_element {",
+              "} __attribute__((packed));",
+              r"u8\\s+data\\[0\\]\\s*;",
+              "u8 data[];"
           )
-          replace_once(
+          patch_struct(
               "include/wlan_bssdef.h",
-              "typedef struct _NDIS_802_11_VARIABLE_IEs {\n\tu8  ElementID;\n\tu8  Length;\n\tu8  data[1];\n}",
-              "typedef struct _NDIS_802_11_VARIABLE_IEs {\n\tu8  ElementID;\n\tu8  Length;\n\tu8  data[];\n}"
+              "typedef struct _NDIS_802_11_VARIABLE_IEs {",
+              "} NDIS_802_11_VARIABLE_IEs, *PNDIS_802_11_VARIABLE_IEs;",
+              r"u8\\s+data\\[1\\]\\s*;",
+              "u8  data[];"
           )
 
-          # Make the switch's unmatched/default arm explicit without changing
-          # values handled by the preceding cases.
           p = Path("core/rtw_wlan_util.c")
           s = p.read_text()
           start = s.index("void update_beacon_info(")
           end = s.index("\\n#ifdef CONFIG_DFS", start)
           fn = s[start:end]
-          marker = "\\t\\tdefault:\\n\\t\\t\\tbreak;"
-          if fn.count(marker) != 1:
-              raise SystemExit(f"update_beacon_info default case matches={fn.count(marker)}")
-          fn = fn.replace(marker, "\\t\\tcase 0xff:\\n\\t\\t\\tbreak;\\n" + marker, 1)
-          p.write_text(s[:start] + fn + s[end:])
-
-          # Show the exact patched declarations and the affected switch.
-          for path, needle in [
-              ("include/ieee80211.h", "struct ieee80211_info_element {"),
-              ("include/wlan_bssdef.h", "typedef struct _NDIS_802_11_VARIABLE_IEs {"),
-              ("core/rtw_wlan_util.c", "void update_beacon_info("),
-          ]:
-              lines = Path(path).read_text().splitlines()
-              idx = next(i for i, line in enumerate(lines) if needle in line)
-              print(f"--- {path}:{idx+1} ---")
-              for line in lines[idx:idx+12]:
-                  print(line)
+          # Clang's diagnostic points to the default labels. A case label
+          # immediately before default prevents the implicit fall-through
+          # when optional switch labels are preprocessed out.
+          marker = re.compile(r"(?m)^(\\s*)default:")
+          fn2, n = marker.subn(lambda m: f"{m.group(1)}case 0xff:\\n{m.group(1)}\\tbreak;\\n{m.group(1)}default:", fn, count=1)
+          if n != 1:
+              raise SystemExit(f"update_beacon_info default label match count={n}")
+          p.write_text(s[:start] + fn2 + s[end:])
           PY
+          # Ensure the edits landed in the intended declarations.
+          grep -A4 -F 'struct ieee80211_info_element {' include/ieee80211.h
+          grep -A4 -F 'typedef struct _NDIS_802_11_VARIABLE_IEs {' include/wlan_bssdef.h
+
 
           make -C "$KDIR" M="$PWD" \
             ARCH=arm64 \
