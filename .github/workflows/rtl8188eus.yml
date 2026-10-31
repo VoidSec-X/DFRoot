@@ -41,14 +41,60 @@ jobs:
           test -f "$KERNEL_SRC/Makefile"
           test -f "$KERNEL_SRC/.config"
 
-          # Start from a pristine upstream driver tree for reproducible output.
-          make -C "$KERNEL_SRC" M="$PWD" clean || true
-          git clean -ffdx
-          git reset --hard HEAD
+          # Apply minimal source-level compatibility fixes: missing switch breaks
+          # were accidental fall-through, and IE data is a variable-length tail.
+          python3 - <<'PY'
+          from pathlib import Path
 
-          # This legacy Realtek driver expects explicit host byte-order defines
-          # when not using its old CONFIG_PLATFORM_I386_PC platform preset.
-          # Keep the DDK's Android ARM64 Kbuild/toolchain and specify USB RTL8188E.
+          util = Path("core/rtw_wlan_util.c")
+          src = util.read_text()
+          src = src.replace(
+              """\t\t\tcase _RSN_IE_2_:
+          \t\t\t\tif (_rtw_memcmp((pIE->data + 8), RSN_TKIP_CIPHER, 4))
+          \t\t\t\t\treturn _TRUE;
+
+          \t\t\tdefault:""",
+              """\t\t\tcase _RSN_IE_2_:
+          \t\t\t\tif (_rtw_memcmp((pIE->data + 8), RSN_TKIP_CIPHER, 4))
+          \t\t\t\t\treturn _TRUE;
+          \t\t\t\tbreak;
+
+          \t\t\tdefault:""",
+              1,
+          )
+          src = src.replace(
+              """\t\t\tcase _RSN_IE_2_:
+          \t\t\t\tif ((_rtw_memcmp((pIE->data + 8), RSN_CIPHER_SUITE_CCMP, 4))  ||
+          \t\t\t\t    (_rtw_memcmp((pIE->data + 12), RSN_CIPHER_SUITE_CCMP, 4)))
+          \t\t\t\t\treturn _FALSE;
+
+          \t\t\tdefault:""",
+              """\t\t\tcase _RSN_IE_2_:
+          \t\t\t\tif ((_rtw_memcmp((pIE->data + 8), RSN_CIPHER_SUITE_CCMP, 4))  ||
+          \t\t\t\t    (_rtw_memcmp((pIE->data + 12), RSN_CIPHER_SUITE_CCMP, 4)))
+          \t\t\t\t\treturn _FALSE;
+          \t\t\t\tbreak;
+
+          \t\t\tdefault:""",
+              1,
+          )
+          if "case _RSN_IE_2_:" not in src:
+              raise SystemExit("Expected RSN switch cases not found")
+          util.write_text(src)
+
+          # Convert legacy one-byte trailing IE arrays to flexible arrays.
+          bss = Path("include/wlan_bssdef.h")
+          text = bss.read_text()
+          old = "\tUCHAR  data[1];"
+          if old not in text:
+              raise SystemExit("Expected variable IE data[1] declaration not found")
+          bss.write_text(text.replace(old, "\tUCHAR  data[];", 1))
+          PY
+
+          # Build with the DDK's Android ARM64 kernel/toolchain; no warning suppression.
+          make -C "$KERNEL_SRC" M="$PWD" clean || true
+          find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
+
           make -C "$KERNEL_SRC" \
             M="$PWD" \
             ARCH=arm64 \
@@ -58,7 +104,7 @@ jobs:
             CONFIG_RTL8188E=y \
             CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -Wno-error=array-bounds" \
+            KCFLAGS="-DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE" \
             modules V=1
 
           test -s 8188eu.ko
