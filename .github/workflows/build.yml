@@ -144,6 +144,19 @@ jobs:
                   raise SystemExit("autoconf.h: cannot enable CONFIG_IOCTL_CFG80211")
           if "#define RTW_SINGLE_WIPHY" in source:
               raise SystemExit("RTW_SINGLE_WIPHY unexpectedly enabled; refusing to change wiphy mode")
+
+          # Android 6.6 cfg80211 validates start_p2p_device/stop_p2p_device
+          # as a paired callback set in wiphy_new_nm(). This USB station
+          # driver does not need a dedicated P2P-device wiphy, so disable
+          # CONFIG_P2P for this external-module build and leave both ops NULL.
+          import re
+          source, p2p_count = re.subn(
+              r"^\s*#define CONFIG_P2P\s*$",
+              "/* #undef CONFIG_P2P: no dedicated P2P-device ops */",
+              source, count=1, flags=re.M
+          )
+          if p2p_count != 1:
+              raise SystemExit("autoconf.h: expected exactly one CONFIG_P2P define")
           p.write_text(source)
 
           # Android 15 exports filp_open() and kernel_read() in the VFS namespace.
