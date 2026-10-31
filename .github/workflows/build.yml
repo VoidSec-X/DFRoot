@@ -403,69 +403,51 @@ jobs:
               elif source.count(new) != 1:
                   raise SystemExit(f"{path}: callback signature not found or ambiguous")
               p.write_text(source)
-          # The Android 15 6.6 tasklet dispatcher calls callback(struct tasklet_struct *).
-          # Use tasklet_setup() and recover recv_priv from its embedded tasklet;
-          # do not route through the legacy unsigned-long callback ABI.
-          p = Path("include/rtw_recv.h")
-          source = p.read_text()
-          marker = "struct recv_priv {"
-          start_struct = source.find(marker)
-          if start_struct < 0:
-              raise SystemExit("rtw_recv.h: recv_priv structure not found")
-          struct_end = source.find("\n};", start_struct)
-          if struct_end < 0:
-              raise SystemExit("rtw_recv.h: recv_priv structure terminator not found")
-          block = source[start_struct:struct_end]
-          old_member = "struct tasklet_struct recv_tasklet;"
-          new_member = "struct tasklet_struct recv_tasklet;"
-          if block.count(old_member) != 1:
-              raise SystemExit("rtw_recv.h: expected one Linux recv_tasklet member")
-          # Keep the existing member name; wrapper uses from_tasklet() to get
-          # recv_priv and its adapter without storing a pointer in tasklet data.
+          # Linux 6.6 has both legacy tasklet_init(unsigned long) and
+          # modern tasklet_setup(struct tasklet_struct *) callbacks.
+          # This driver uses tasklet_init, so retain it and match its callback ABI.
           p = Path("include/usb_ops_linux.h")
           source = p.read_text()
-          old = "void usb_recv_tasklet(void *priv);"
-          new = "void usb_recv_tasklet(struct tasklet_struct *tasklet);"
-          if source.count(old) != 1:
-              raise SystemExit("usb_ops_linux.h: expected one tasklet prototype")
-          p.write_text(source.replace(old, new, 1))
+          import re
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\(\s*[^;]+\s*\)\s*;",
+              "void usb_recv_tasklet(unsigned long priv);",
+              source, count=1)
+          if count != 1:
+              raise SystemExit("usb_ops_linux.h: recv tasklet prototype not found exactly once")
+          p.write_text(source)
 
           p = Path("os_dep/linux/usb_ops_linux.c")
           source = p.read_text()
-          old_sig = "void usb_recv_tasklet(void *priv)"
-          new_sig = "void usb_recv_tasklet(struct tasklet_struct *tasklet)"
-          if source.count(old_sig) != 2:
-              raise SystemExit(f"usb_ops_linux.c: expected two RX tasklet implementations, found {source.count(old_sig)}")
-          source = source.replace(old_sig, new_sig)
-          # The two implementations share the callback name across mutually
-          # exclusive CONFIG_USE_USB_BUFFER_ALLOC_RX branches. Recover adapter
-          # through recv_priv::adapter in both branches.
-          source = source.replace(
-              "_adapter\t*padapter = (_adapter *)priv;\n\tstruct recv_priv\t*precvpriv = &padapter->recvpriv;",
-              "struct recv_priv *precvpriv = from_tasklet(precvpriv, tasklet, recv_tasklet);\n\t_adapter *padapter = precvpriv->adapter;",
-              1)
-          source = source.replace(
-              "_adapter\t\t*padapter = (_adapter *)priv;\n\tstruct recv_priv\t*precvpriv = &padapter->recvpriv;",
-              "struct recv_priv *precvpriv = from_tasklet(precvpriv, tasklet, recv_tasklet);\n\t_adapter *padapter = precvpriv->adapter;",
-              1)
-          if source.count("from_tasklet(precvpriv, tasklet, recv_tasklet)") != 2:
-              raise SystemExit("usb_ops_linux.c: failed to convert both recv tasklet implementations to from_tasklet")
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\(\s*[^)]*\)",
+              "void usb_recv_tasklet(unsigned long priv)",
+              source)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected 2 recv callback definitions, changed {count}")
+          # tasklet_init's data parameter carries the adapter pointer.
+          source, count = re.subn(
+              r"_adapter\s*\*\s*padapter\s*=\s*\(_adapter\s*\*\)\s*priv\s*;",
+              "_adapter *padapter = (_adapter *)(uintptr_t)priv;",
+              source, count=2)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected 2 adapter-data conversions, changed {count}")
           p.write_text(source)
 
           p = Path("hal/hal_hci/hal_usb.c")
           source = p.read_text()
-          import re
           pattern = re.compile(
-              r'tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,.*?\(unsigned long\)padapter\s*\);',
-              re.S,
-          )
-          source, count = pattern.subn(
-              "tasklet_setup(&precvpriv->recv_tasklet, usb_recv_tasklet);",
-              source, count=1)
+              r"(tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*)"
+              r"\(\s*void\s*\(\s*\*\s*\)\s*\(\s*unsigned\s+long\s*\)\s*\)\s*"
+              r"usb_recv_tasklet",
+              re.S)
+          source, count = pattern.subn(r"\1usb_recv_tasklet", source, count=1)
           if count != 1:
-              # Accept only an already-correct setup call; never silently skip.
-              if not re.search(r'tasklet_setup\s*\(\s*&precvpriv->recv_tasklet\s*,\s*usb_recv_tasklet\s*\)', source):
-                  raise SystemExit("hal_usb.c: tasklet_init for recv_tasklet not found")
+              direct = re.search(
+                  r"tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*usb_recv_tasklet\s*,",
+                  source, re.S)
+              if not direct:
+                  raise SystemExit("hal_usb.c: legacy recv tasklet_init callback not found")
           p.write_text(source)
 
           PY
