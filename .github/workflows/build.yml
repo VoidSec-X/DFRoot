@@ -93,31 +93,27 @@ jobs:
           block = block.replace("data[1]", "data[]", 1)
           p.write_text(source[:start] + block + source[end:])
 
-          # Fix only the two compiler-reported RSN fallthrough sites.
+          # Add explicit breaks after conditional RSN returns.
+          # Some upstream revisions contain an additional RSN case, so patch
+          # each matching return branch instead of assuming a fixed case count.
           p = Path("core/rtw_wlan_util.c")
           lines = p.read_text().splitlines()
-          patched = 0
+          inserts = []
           for n, line in enumerate(lines):
               if line.strip() != "case _RSN_IE_2_:":
                   continue
-              # Ignore unrelated switch cases; only these branches contain
-              # the returns in the cipher-suite parser that trigger Clang.
               stop = next((m for m in range(n + 1, len(lines))
-                           if lines[m].strip() in ("default:", "case _RSN_IE_1_:")), len(lines))
-              block = lines[n:stop]
-              returns = [m for m, text in enumerate(block)
-                         if text.strip() in ("return _TRUE;", "return _FALSE;")]
-              if not returns:
-                  continue
-              ret = n + returns[-1]
-              if ret + 1 < len(lines) and lines[ret + 1].strip() == "break;":
-                  continue
-              # Put break at case indentation so it is outside the if body.
-              case_indent = line[:len(line) - len(line.lstrip())]
-              lines.insert(ret + 1, case_indent + "break;")
-              patched += 1
-          if patched != 2:
-              raise SystemExit(f"expected to patch two RSN cipher branches, patched {patched}")
+                           if lines[m].strip().startswith(("case ", "default:"))), len(lines))
+              for m in range(n + 1, stop):
+                  if lines[m].strip() in ("return _TRUE;", "return _FALSE;"):
+                      if m + 1 >= len(lines) or lines[m + 1].strip() != "break;":
+                          indent = line[:len(line) - len(line.lstrip())]
+                          inserts.append((m + 1, indent + "break;"))
+                      break
+          if not inserts:
+              raise SystemExit("no RSN conditional return branches found to patch")
+          for index, statement in reversed(inserts):
+              lines.insert(index, statement)
           p.write_text("\\n".join(lines) + "\\n")
           PY
 
