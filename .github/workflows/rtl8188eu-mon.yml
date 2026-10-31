@@ -441,6 +441,12 @@ jobs:
           source = source.replace(old, new, 1)
           p.write_text(source)
 
+          # Ensure declaration, definition and tasklet_init registration stay aligned.
+          grep -Fq 'void rtl8188eu_xmit_tasklet(unsigned long priv);' include/rtl8188e_xmit.h
+          grep -Fq 'void rtl8188eu_xmit_tasklet(unsigned long priv)' hal/rtl8188e/usb/usb_ops_linux.c
+          grep -Fq 'rtl8188eu_xmit_tasklet,' hal/rtl8188e/usb/rtl8188eu_xmit.c
+          ! grep -Fq '(void(*)(unsigned long))rtl8188eu_xmit_tasklet' hal/rtl8188e/usb/rtl8188eu_xmit.c
+
           # Verify the TX callback that actually faulted on-device. Its KCFI
           # type ID must match the legacy tasklet_init callback type, 0xaecee44b.
                     # TX callback ABI check, alongside the existing RX tasklet check.
