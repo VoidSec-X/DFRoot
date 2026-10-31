@@ -93,34 +93,28 @@ jobs:
           block = block.replace("data[1]", "data[]", 1)
           p.write_text(source[:start] + block + source[end:])
 
-          # Add explicit breaks after conditional RSN returns to satisfy Clang.
+          # Clang flags intentional RSN case fallthrough as misleading-indentation.
+          # Add an explicit break at the end of each _RSN_IE_2_ case block.
           p = Path("core/rtw_wlan_util.c")
-          lines = p.read_text().splitlines()
-          inserted = 0
-          i = 0
-          while i < len(lines) - 2:
-              if lines[i].strip() == "case _RSN_IE_2_:":
-                  j = i + 1
-                  while j < len(lines) and lines[j].strip() != "default:":
-                      if lines[j].strip() in ("return _TRUE;", "return _FALSE;"):
-                          # Align break with the controlling if, not its return body.
-                          k = j - 1
-                          while k > i and not lines[k].strip().startswith("if "):
-                              k -= 1
-                          if k <= i:
-                              raise SystemExit("RSN return has no matching if statement")
-                          indent = lines[k][:len(lines[k]) - len(lines[k].lstrip())]
-                          lines.insert(j + 1, indent + "break;")
-                          inserted += 1
-                          j += 1
-                          break
-                      j += 1
-                  i = j
-              else:
-                  i += 1
-          if inserted < 2:
-              raise SystemExit(f"expected to patch both RSN case branches, patched {inserted}")
-          p.write_text("\n".join(lines) + "\n")
+          source = p.read_text()
+          case_marker = "case _RSN_IE_2_:"
+          positions = []
+          offset = 0
+          while True:
+              pos = source.find(case_marker, offset)
+              if pos < 0:
+                  break
+              default_pos = source.find("default:", pos)
+              if default_pos < 0:
+                  raise SystemExit("RSN case has no following default label")
+              positions.append(default_pos)
+              offset = default_pos + len("default:")
+          if len(positions) != 2:
+              raise SystemExit(f"expected exactly two RSN cases, found {len(positions)}")
+          for pos in reversed(positions):
+              line_start = source.rfind("\\n", 0, pos) + 1
+              source = source[:line_start] + "\\t\\tbreak;\\n" + source[line_start:]
+          p.write_text(source)
           PY
 
           make -C "$KDIR" M="$PWD" \
