@@ -1,0 +1,69 @@
+name: Build RTL8188EUS Module
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/rtl8188eus.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/rtl8188eus.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-rtl8188eus:
+    name: RTL8188EUS / android15-6.6
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+      options: --privileged
+    steps:
+      - name: Checkout DFRoot workflow repository
+        uses: actions/checkout@v7
+
+      - name: Clone Aircrack-ng RTL8188EUS driver
+        run: |
+          git clone --depth=1 --branch v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
+
+      - name: Build 8188eu.ko
+        working-directory: rtl8188eu
+        env:
+          ARCH: arm64
+          SUBARCH: arm64
+        run: |
+          set -euxo pipefail
+
+          # DDK image supplies the Android 15 / 6.6 kernel build environment.
+          # Use its prepared kernel build tree rather than DFRoot's own LKM.
+          if [ -n "${KERNEL_SRC:-}" ] && [ -d "$KERNEL_SRC" ]; then
+            KERNEL_DIR="$KERNEL_SRC"
+          elif [ -n "${KERNEL_DIR:-}" ] && [ -d "$KERNEL_DIR" ]; then
+            :
+          elif [ -d /kernel ]; then
+            KERNEL_DIR=/kernel
+          elif [ -d /usr/src/linux ]; then
+            KERNEL_DIR=/usr/src/linux
+          else
+            echo "::error::Kernel build tree not found in DDK image. Set KERNEL_SRC to its prepared kernel tree."
+            find / -maxdepth 3 -type f -name Makefile 2>/dev/null | head -80 || true
+            exit 1
+          fi
+
+          echo "Using kernel tree: $KERNEL_DIR"
+          test -f "$KERNEL_DIR/Makefile"
+          make -C "$KERNEL_DIR" M="$PWD" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" modules
+
+          test -s 8188eu.ko
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
+          file "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
+          (modinfo "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko" || true)
+
+      - name: Upload RTL8188EUS kernel module
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtl8188eus-android15-6.6
+          path: out/8188eu-android15-6.6.ko
+          if-no-files-found: error
