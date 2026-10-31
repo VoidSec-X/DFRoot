@@ -255,6 +255,44 @@ jobs:
               raise SystemExit("ioctl_cfg80211.c: channel copy site not found exactly once")
           source = source.replace(old, new, 1)
 
+          # Match optional cfg80211 callbacks to the Android 15 / Linux 6.6 ABI.
+          # PNO is disabled in the current driver Makefile, but if enabled its
+          # sched_scan_stop callback still receives reqid on Linux 6.6.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = """static int cfg80211_rtw_sched_scan_stop(struct wiphy *wiphy,
+          \t\tstruct net_device *dev)
+          {"""
+          new = """static int cfg80211_rtw_sched_scan_stop(struct wiphy *wiphy,
+          \t\tstruct net_device *dev, u64 reqid)
+          {"""
+          if source.count(old) != 1:
+              raise SystemExit("cfg80211 sched_scan_stop: expected legacy two-argument callback exactly once")
+          source = source.replace(old, new, 1)
+
+          # Linux 6.6 added link_id to cfg80211_ops.tdls_mgmt. TDLS is disabled
+          # in this build, but keep the callback declaration ABI-correct when
+          # the feature is enabled in a future driver configuration.
+          old = """#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0))
+          \tconst u8 *peer,
+          #else
+          \tu8 *peer,
+          #endif
+          \tu8 action_code,"""
+          new = """#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0))
+          \tconst u8 *peer,
+          #else
+          \tu8 *peer,
+          #endif
+          #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
+          \tint link_id,
+          #endif
+          \tu8 action_code,"""
+          if source.count(old) != 1:
+              raise SystemExit("cfg80211 tdls_mgmt: expected peer/action callback signature exactly once")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
           # Add a compact breadcrumb so a future scan-path failure can be
           # correlated with the exact cfg80211 request before dereferencing it.
           marker = "static int cfg80211_rtw_scan(struct wiphy *wiphy"
