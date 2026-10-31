@@ -32,34 +32,35 @@ jobs:
         env:
           ARCH: arm64
           SUBARCH: arm64
+        shell: bash
         run: |
           set -euxo pipefail
 
-          # DDK image supplies the Android 15 / 6.6 kernel build environment.
-          # Use its prepared kernel build tree rather than DFRoot's own LKM.
-          if [ -n "${KERNEL_SRC:-}" ] && [ -d "$KERNEL_SRC" ]; then
-            KERNEL_DIR="$KERNEL_SRC"
-          elif [ -n "${KERNEL_DIR:-}" ] && [ -d "$KERNEL_DIR" ]; then
-            :
-          elif [ -d /kernel ]; then
-            KERNEL_DIR=/kernel
-          elif [ -d /usr/src/linux ]; then
-            KERNEL_DIR=/usr/src/linux
-          else
-            echo "::error::Kernel build tree not found in DDK image. Set KERNEL_SRC to its prepared kernel tree."
-            find / -maxdepth 3 -type f -name Makefile 2>/dev/null | head -80 || true
-            exit 1
-          fi
+          : "${KERNEL_SRC:?DDK image did not set KERNEL_SRC}"
+          : "${CROSS_COMPILE:?DDK image did not set CROSS_COMPILE}"
+          test -f "$KERNEL_SRC/Makefile"
+          test -f "$KERNEL_SRC/.config"
 
-          echo "Using kernel tree: $KERNEL_DIR"
-          test -f "$KERNEL_DIR/Makefile"
-          make -C "$KERNEL_DIR" M="$PWD" ARCH=arm64 CROSS_COMPILE="${CROSS_COMPILE:-}" modules
+          # The upstream standalone Makefile defaults CONFIG_PLATFORM_I386_PC=y,
+          # which overrides the DDK toolchain/target. Disable that host preset
+          # and build the driver's Kbuild target directly for the prepared arm64 tree.
+          make -C "$KERNEL_SRC" \
+            M="$PWD" \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            LLVM=1 \
+            CONFIG_RTL8188EU=m \
+            CONFIG_RTL8188E=y \
+            CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_I386_PC=n \
+            KBUILD_EXTMOD="$PWD" \
+            modules V=1
 
           test -s 8188eu.ko
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
           file "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
-          (modinfo "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko" || true)
+          modinfo "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko" || true
 
       - name: Upload RTL8188EUS kernel module
         uses: actions/upload-artifact@v7
