@@ -82,35 +82,26 @@ jobs:
           \t\t\t\tch_offset = secondary_ch_offset_to_hal_ch_offset(ie->data[0]);""",
           )
 
-          # Preserve switch semantics: no fall-through when an RSN case does not match.
+          # Preserve switch semantics: stop each RSN branch before default.
           util = Path("core/rtw_wlan_util.c")
           source = util.read_text()
-          old_cases = [
-              """\t\t\tcase _RSN_IE_2_:
-          \t\t\t\tif (_rtw_memcmp((pIE->data + 8), RSN_TKIP_CIPHER, 4))
-          \t\t\t\t\treturn _TRUE;
-
-          \t\t\tdefault:""",
-              """\t\t\tcase _RSN_IE_2_:
-          \t\t\t\tif ((_rtw_memcmp((pIE->data + 8), RSN_CIPHER_SUITE_CCMP, 4))  ||
-          \t\t\t\t    (_rtw_memcmp((pIE->data + 12), RSN_CIPHER_SUITE_CCMP, 4)))
-          \t\t\t\t\treturn _FALSE;
-
-          \t\t\tdefault:""",
-          ]
-          for old in old_cases:
-              if source.count(old) != 1:
-                  raise SystemExit("Expected RSN case with accidental fall-through not found exactly once")
-          source = source.replace(
-              old_cases[0],
-              old_cases[0].replace("\n\n\t\t\tdefault:", "\n\t\t\t\tbreak;\n\n\t\t\tdefault:"),
-              1,
+          source, first = re.subn(
+              r"(case _RSN_IE_2_:\n[ \t]*if \(_rtw_memcmp\(\(pIE->data \+ 8\), RSN_TKIP_CIPHER, 4\)\)\n[ \t]*return _TRUE;)\n\n([ \t]*default:)",
+              r"\1\n\t\t\t\tbreak;\n\n\2",
+              source,
+              count=1,
           )
-          source = source.replace(
-              old_cases[1],
-              old_cases[1].replace("\n\n\t\t\tdefault:", "\n\t\t\t\tbreak;\n\n\t\t\tdefault:"),
-              1,
+          if first != 1:
+              raise SystemExit("TKIP RSN switch case patch did not match exactly once")
+
+          source, second = re.subn(
+              r"(case _RSN_IE_2_:\n[ \t]*if \(\(_rtw_memcmp\(\(pIE->data \+ 8\), RSN_CIPHER_SUITE_CCMP, 4\)\)\s+\|\|\n[ \t]*\(_rtw_memcmp\(\(pIE->data \+ 12\), RSN_CIPHER_SUITE_CCMP, 4\)\)\)\n[ \t]*return _FALSE;)\n\n([ \t]*default:)",
+              r"\1\n\t\t\t\tbreak;\n\n\2",
+              source,
+              count=1,
           )
+          if second != 1:
+              raise SystemExit("CCMP RSN switch case patch did not match exactly once")
           util.write_text(source)
           PY
 
