@@ -163,6 +163,15 @@ jobs:
           # Keep the four P2P timer cancellations conditional as well.
           p = Path("os_dep/linux/os_intfs.c")
           source = p.read_text()
+
+          # CONFIG_P2P is disabled above, so guard both the P2P-only adapter
+          # member and every use of it. Other timer cancellations stay active.
+          old_decl = "\tstruct wifidirect_info *pwdinfo = &padapter->wdinfo;"
+          new_decl = "#ifdef CONFIG_P2P\n\tstruct wifidirect_info *pwdinfo = &padapter->wdinfo;\n#endif"
+          if source.count(old_decl) != 1:
+              raise SystemExit("os_intfs.c: expected exactly one P2P wdinfo declaration")
+          source = source.replace(old_decl, new_decl, 1)
+
           old = """\t_cancel_timer_ex(&pwdinfo->find_phase_timer);
           \t_cancel_timer_ex(&pwdinfo->restore_p2p_state_timer);
           \t_cancel_timer_ex(&pwdinfo->pre_tx_scan_timer);
