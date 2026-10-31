@@ -348,20 +348,29 @@ jobs:
           p = Path("include/xmit_osdep.h")
           source = p.read_text()
           old = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          new = "extern netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          new = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
+          already = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
+          compat = "extern netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
           if old in source:
               source = source.replace(old, new, 1)
-          elif new not in source:
+          elif compat in source:
+              source = source.replace(compat, new, 1)
+          elif already not in source:
               raise SystemExit("xmit_osdep.h: Linux rtw_xmit_entry prototype not found")
           p.write_text(source)
 
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
           old = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          new = "netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          if source.count(old) != 1:
-              raise SystemExit("xmit_linux.c: expected one rtw_xmit_entry definition")
-          p.write_text(source.replace(old, new, 1))
+          compat = "netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          new = "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif source.count(compat) == 1:
+              source = source.replace(compat, new, 1)
+          elif source.count(new) != 1:
+              raise SystemExit("xmit_linux.c: Linux rtw_xmit_entry definition not found or ambiguous")
+          p.write_text(source)
 
           PY
 
