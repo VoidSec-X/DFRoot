@@ -146,15 +146,17 @@ jobs:
               raise SystemExit("RTW_SINGLE_WIPHY unexpectedly enabled; refusing to change wiphy mode")
           p.write_text(source)
 
-          # Linux 6.6 removed cfg80211_send_rx_assoc()/cfg80211_send_disassoc().
-          # Keep the driver's existing notification paths, but provide 6.6
-          # equivalents using the public cfg80211 APIs and original frame.
+          # Linux 6.6 removed the legacy association/disassociation helpers.
+          # Replace the existing compatibility macro in-place, keeping exactly
+          # one definition and preserving the original cfg80211 notification flow.
           p = Path("os_dep/linux/ioctl_cfg80211.h")
           source = p.read_text()
-          marker = "#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0))"
-          if marker not in source:
-              raise SystemExit("ioctl_cfg80211.h: association compatibility marker missing")
-          wrapper = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+          old_block = """#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0))  && !defined(COMPAT_KERNEL_RELEASE)
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, buf, len)
+          #else
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
+          #endif"""
+          new_block = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
           #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) \\
           do { \\
               struct cfg80211_rx_assoc_resp assoc_resp = { \\
@@ -166,9 +168,14 @@ jobs:
               }; \\
               cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
           } while (0)
-          #endif
-          """
-          source = source.replace(marker, wrapper + marker, 1)
+          #elif (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0)) && !defined(COMPAT_KERNEL_RELEASE)
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, buf, len)
+          #else
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
+          #endif"""
+          if source.count(old_block) != 1:
+              raise SystemExit("ioctl_cfg80211.h: expected original association macro block exactly once")
+          source = source.replace(old_block, new_block, 1)
           p.write_text(source)
 
           p = Path("os_dep/linux/ioctl_cfg80211.c")
