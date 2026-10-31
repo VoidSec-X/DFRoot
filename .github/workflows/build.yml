@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, fix/rtl8188eus-kcfi-abi-android15-66]
     tags: ['v*']
   pull_request:
     branches: [master, main]
@@ -54,6 +54,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          KERNEL_RELEASE="$(make -s -C "$KDIR" kernelrelease)"
+          echo "DDK kernelrelease: $KERNEL_RELEASE"
+          if [ "$KERNEL_RELEASE" != "6.6.127-4k" ]; then
+            echo "::error::Expected Android 15 kernel 6.6.127-4k, got $KERNEL_RELEASE"
+            exit 1
+          fi
+          grep -q '^CONFIG_CFI_CLANG=y' "$KDIR/.config"
+          grep -q '^CONFIG_MODVERSIONS=y' "$KDIR/.config"
           git clone --depth=1 --branch v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
           cd rtl8188eu
 
@@ -147,6 +155,161 @@ jobs:
 
           # Keep CONFIG_P2P enabled. The station driver retains its upstream
           # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
+
+          # Enable the driver's existing monitor-mode implementation. The
+          # upstream wiphy advertises MONITOR only when CONFIG_WIFI_MONITOR
+          # is set (CONFIG_AP_MODE is already enabled in this build).
+          p = Path("include/autoconf.h")
+          source = p.read_text()
+          if "#define CONFIG_WIFI_MONITOR" not in source:
+              old = "#define CONFIG_AP_MODE"
+              if source.count(old) != 1:
+                  raise SystemExit("autoconf.h: CONFIG_AP_MODE anchor not found exactly once")
+              source = source.replace(old, old + "\n#define CONFIG_WIFI_MONITOR", 1)
+              p.write_text(source)
+
+          # Harden the cfg80211 scan callback for wildcard/empty-SSID scans.
+          # Validate request before reading its members; SSIDs are inline arrays.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = "struct cfg80211_ssid *ssids = request->ssids;"
+          new = "struct cfg80211_ssid *ssids;"
+          if source.count(old) != 1:
+              raise SystemExit("scan: unsafe ssids initializer not found exactly once")
+          source = source.replace(old, new, 1)
+          old = "\tif (!request)\n\t\treturn -EINVAL;\n\tpr_err("
+          new = "\tif (!request)\n\t\treturn -EINVAL;\n\tssids = request->ssids;\n\tpr_err("
+          if source.count(old) != 1:
+              raise SystemExit("scan: request guard/breadcrumb anchor not found exactly once")
+          source = source.replace(old, new, 1)
+          old = "\twdev = request->wdev;"
+          new = """\twdev = request->wdev;
+          \tif (!wdev) {
+          \t\tret = -EINVAL;
+          \t\tgoto exit;
+          \t}"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: expected one scan request wdev assignment")
+          source = source.replace(old, new, 1)
+
+          old = """\tpwdev_priv = adapter_wdev_data(padapter);
+          \tpmlmepriv = &padapter->mlmepriv;"""
+          new = """\tif (request->n_ssids < 0 ||
+          \t    (request->n_ssids && !ssids) ||
+          \t    (request->n_channels && !request->channels) ||
+          \t    request->n_ssids > RTW_SSID_SCAN_AMOUNT ||
+          \t    request->n_channels > RTW_CHANNEL_SCAN_AMOUNT ||
+          \t    (request->ie_len && !request->ie)) {
+          \t\tret = -EINVAL;
+          \t\tgoto exit;
+          \t}
+          \t/* SSID elements contain inline arrays; validate lengths before P2P. */
+          \tfor (i = 0; i < request->n_ssids; i++) {
+          \t\tif (ssids[i].ssid_len > sizeof(parm.ssid[i].Ssid)) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
+          \t}
+          \t/* Validate every channel before the P2P social-channel fast path
+          \t * dereferences channels[0..2]. */
+          \tfor (i = 0; i < request->n_channels; i++) {
+          \t\tif (!request->channels[i]) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
+          \t}
+          \tpwdev_priv = adapter_wdev_data(padapter);
+          \tpmlmepriv = &padapter->mlmepriv;"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: scan request array validation anchor not found")
+          source = source.replace(old, new, 1)
+
+          old = """\t\tif (ssids->ssid != NULL
+          \t\t\t&& _rtw_memcmp(ssids->ssid, "DIRECT-", 7)"""
+          new = """\t\tif (request->n_ssids > 0 && ssids != NULL &&
+          \t\t    ssids[0].ssid_len >= 7
+          \t\t\t&& _rtw_memcmp(ssids[0].ssid, "DIRECT-", 7)"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: wildcard SSID/P2P dereference not found exactly once")
+          source = source.replace(old, new, 1)
+
+          old = """\t\t_rtw_memcpy(&parm.ssid[i].Ssid, ssids[i].ssid, ssids[i].ssid_len);
+          \t\tparm.ssid[i].SsidLength = ssids[i].ssid_len;"""
+          new = """\t\tif (ssids[i].ssid_len > sizeof(parm.ssid[i].Ssid)) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
+          \t\t_rtw_memcpy(&parm.ssid[i].Ssid, ssids[i].ssid, ssids[i].ssid_len);
+          \t\tparm.ssid[i].SsidLength = ssids[i].ssid_len;"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: SSID copy site not found exactly once")
+          source = source.replace(old, new, 1)
+
+          old = """\t\tparm.ch[i].hw_value = request->channels[i]->hw_value;"""
+          new = """\t\tif (!request->channels[i]) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
+          \t\tparm.ch[i].hw_value = request->channels[i]->hw_value;"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: channel copy site not found exactly once")
+          source = source.replace(old, new, 1)
+
+          # Match optional cfg80211 callbacks to the Android 15 / Linux 6.6 ABI.
+          # PNO is disabled in the current driver Makefile, but if enabled its
+          # sched_scan_stop callback still receives reqid on Linux 6.6.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = """static int cfg80211_rtw_sched_scan_stop(struct wiphy *wiphy,
+          \t\tstruct net_device *dev)
+          {"""
+          new = """static int cfg80211_rtw_sched_scan_stop(struct wiphy *wiphy,
+          \t\tstruct net_device *dev, u64 reqid)
+          {"""
+          if source.count(old) != 1:
+              raise SystemExit("cfg80211 sched_scan_stop: expected legacy two-argument callback exactly once")
+          source = source.replace(old, new, 1)
+
+          # Linux 6.6 added link_id to cfg80211_ops.tdls_mgmt. TDLS is disabled
+          # in this build, but keep the callback declaration ABI-correct when
+          # the feature is enabled in a future driver configuration.
+          old = """#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0))
+          \tconst u8 *peer,
+          #else
+          \tu8 *peer,
+          #endif
+          \tu8 action_code,"""
+          new = """#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0))
+          \tconst u8 *peer,
+          #else
+          \tu8 *peer,
+          #endif
+          #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0))
+          \tint link_id,
+          #endif
+          \tu8 action_code,"""
+          if source.count(old) != 1:
+              raise SystemExit("cfg80211 tdls_mgmt: expected peer/action callback signature exactly once")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
+          # Add a compact breadcrumb so a future scan-path failure can be
+          # correlated with the exact cfg80211 request before dereferencing it.
+          marker = "static int cfg80211_rtw_scan(struct wiphy *wiphy"
+          start = source.find(marker)
+          body = source.find("\n{", start)
+          if start < 0 or body < 0:
+              raise SystemExit("ioctl_cfg80211.c: cfg80211_rtw_scan body not found")
+          brace = body + 2
+          breadcrumb = """
+          \tif (!request)
+          \t\treturn -EINVAL;
+          \tpr_err("DFROOT: scan entry request=%p wdev=%p ssids=%p n_ssids=%u channels=%p n_channels=%u\\n",
+          \t\trequest, request->wdev, request->ssids, request->n_ssids,
+          \t\trequest->channels, request->n_channels);
+          """
+          source = source[:brace] + breadcrumb + source[brace:]
+          p.write_text(source)
 
           # The RTL8188EUS ops table places set_mac_acl inside CONFIG_AP_MODE,
           # but preinit used to advertise max_acl_mac_addrs whenever ACL was enabled.
@@ -340,53 +503,151 @@ jobs:
               source = source.replace(old, new, 1)
           p.write_text(source)
 
-          # Match the Linux net_device_ops ndo_start_xmit CFI prototype.
-          # The upstream driver declared/defined rtw_xmit_entry as int, while
-          # the kernel callback type is netdev_tx_t (*)(struct sk_buff *,
-          # struct net_device *). Clang CFI rejects that incompatible target
-          # at dev_hard_start_xmit when the interface transmits its first frame.
+          # Keep the Realtek legacy TX helper intact. Export a dedicated
+          # ndo_start_xmit entry whose return type is the kernel's enum netdev_tx.
+          # The panic reports expected KCFI type ID 0x44e57e43; plain int produces
+          # 0xab1f26f7 even when the argument types are identical.
           p = Path("include/xmit_osdep.h")
           source = p.read_text()
-          old = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          new = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
-          already = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
-          compat = "extern netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          if old in source:
-              source = source.replace(old, new, 1)
-          elif compat in source:
-              source = source.replace(compat, new, 1)
-          elif already not in source:
-              raise SystemExit("xmit_osdep.h: Linux rtw_xmit_entry prototype not found")
+          legacy = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          prototype = "extern enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev);"
+          # The Linux declaration is present in upstream v5.3.9, but the
+          # FreeBSD copy is also identical. Anchor the insertion to the
+          # PLATFORM_LINUX block so the Linux prototype is never ambiguous.
+          start = source.find("#ifdef PLATFORM_LINUX")
+          end = source.find("#endif /* PLATFORM_LINUX */", start)
+          if start < 0 or end < 0:
+              raise SystemExit("xmit_osdep.h: PLATFORM_LINUX declaration block not found")
+          block = source[start:end]
+          if prototype not in block:
+              if block.count(legacy) != 1:
+                  raise SystemExit("xmit_osdep.h: expected one Linux legacy TX prototype")
+              block = block.replace(legacy, legacy + "\n" + prototype, 1)
+              source = source[:start] + block + source[end:]
           p.write_text(source)
 
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
-          old = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          compat = "netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          new = "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)"
-          if source.count(old) == 1:
-              source = source.replace(old, new, 1)
-          elif source.count(compat) == 1:
-              source = source.replace(compat, new, 1)
-          elif source.count(new) != 1:
-              raise SystemExit("xmit_linux.c: Linux rtw_xmit_entry definition not found or ambiguous")
+          legacy_def = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          wrapper = """enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev)
+          {
+              rtw_xmit_entry((_pkt *)skb, (_nic_hdl)dev);
+              return NETDEV_TX_OK;
+          }"""
+          if source.count(legacy_def) != 1:
+              raise SystemExit("xmit_linux.c: expected original legacy TX definition exactly once")
+          if "rtl8188eu_ndo_start_xmit(" not in source:
+              source = source.rstrip() + "\n\n" + wrapper + "\n"
           p.write_text(source)
 
-          # Fix every other ndo_start_xmit callback assigned in net_device_ops.
-          for path, signature in (
+          # Both physical and virtual station interfaces use the typed callback.
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          old = ".ndo_start_xmit = rtw_xmit_entry,"
+          new = ".ndo_start_xmit = rtl8188eu_ndo_start_xmit,"
+          if source.count(old) != 2:
+              raise SystemExit(f"os_intfs.c: expected two legacy ndo_start_xmit assignments, found {source.count(old)}")
+          p.write_text(source.replace(old, new))
+
+          # The monitor and hostapd management interfaces have their own
+          # ndo_start_xmit callbacks; make their return type the exact enum too.
+          for path, old, new in (
               ("os_dep/linux/ioctl_cfg80211.c",
-               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
+               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)",
+               "static enum netdev_tx rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
               ("os_dep/linux/mlme_linux.c",
-               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
+               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)",
+               "static enum netdev_tx mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
           ):
               p = Path(path)
               source = p.read_text()
-              fixed = signature.replace("static int ", "static netdev_tx_t ", 1)
-              if source.count(signature) == 1:
-                  source = source.replace(signature, fixed, 1)
-              elif source.count(fixed) != 1:
-                  raise SystemExit(f"{path}: expected one xmit callback signature")
+              if source.count(old) == 1:
+                  source = source.replace(old, new, 1)
+              elif source.count(new) != 1:
+                  raise SystemExit(f"{path}: callback signature not found or ambiguous")
               p.write_text(source)
+          # Linux 6.6 has both legacy tasklet_init(unsigned long) and
+          # modern tasklet_setup(struct tasklet_struct *) callbacks.
+          # This driver uses tasklet_init, so retain it and match its callback ABI.
+          p = Path("include/usb_ops_linux.h")
+          source = p.read_text()
+          import re
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\(\s*[^;]+\s*\)\s*;",
+              "void usb_recv_tasklet(unsigned long priv);",
+              source, count=1)
+          if count != 1:
+              raise SystemExit("usb_ops_linux.h: recv tasklet prototype not found exactly once")
+          p.write_text(source)
+
+          p = Path("os_dep/linux/usb_ops_linux.c")
+          source = p.read_text()
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\(\s*[^)]*\)",
+              "void usb_recv_tasklet(unsigned long priv)",
+              source)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected 2 recv callback definitions, changed {count}")
+          # tasklet_init's data parameter carries the adapter pointer.
+          source, count = re.subn(
+              r"_adapter\s*\*\s*padapter\s*=\s*\(_adapter\s*\*\)\s*priv\s*;",
+              "_adapter *padapter = (_adapter *)(uintptr_t)priv;",
+              source, count=2)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected 2 adapter-data conversions, changed {count}")
+          p.write_text(source)
+
+          p = Path("hal/hal_hci/hal_usb.c")
+          source = p.read_text()
+          pattern = re.compile(
+              r"(tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*)"
+              r"\(\s*void\s*\(\s*\*\s*\)\s*\(\s*unsigned\s+long\s*\)\s*\)\s*"
+              r"usb_recv_tasklet",
+              re.S)
+          source, count = pattern.subn(r"\1usb_recv_tasklet", source, count=1)
+          if count != 1:
+              direct = re.search(
+                  r"tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*usb_recv_tasklet\s*,",
+                  source, re.S)
+              if not direct:
+                  raise SystemExit("hal_usb.c: legacy recv tasklet_init callback not found")
+          p.write_text(source)
+
+          # Harden monitor-mode radiotap and 802.11 frame parsing before any
+          # skb_pull() or header dereference. A short/malformed userspace frame
+          # must be dropped, not allowed to underflow skb length or read past data.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = """\tif (unlikely(skb->len < rtap_len))
+          \t\tgoto fail;
+
+          \t/* Skip the ratio tap header */
+          \tskb_pull(skb, rtap_len);
+
+          \tdot11_hdr = (struct rtw_ieee80211_hdr *)skb->data;"""
+          new = """\tif (unlikely(rtap_len < sizeof(*rtap_hdr) || skb->len < rtap_len))
+          \t\tgoto fail;
+
+          \t/* Skip the radiotap header only after validating its full length. */
+          \tskb_pull(skb, rtap_len);
+          \tif (unlikely(skb->len < sizeof(*dot11_hdr)))
+          \t\tgoto fail;
+
+          \tdot11_hdr = (struct rtw_ieee80211_hdr *)skb->data;"""
+          if source.count(old) != 1:
+              raise SystemExit("monitor xmit: radiotap/header validation anchor not found exactly once")
+          source = source.replace(old, new, 1)
+
+          old = """\t\tskb_pull(skb, dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2);
+          \t\tpdata = (unsigned char *)skb->data;"""
+          new = """\t\tif (unlikely(skb->len < dot11_hdr_len + qos_len + snap_len))
+          \t\t\tgoto fail;
+          \t\tskb_pull(skb, dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2);
+          \t\tpdata = (unsigned char *)skb->data;"""
+          if source.count(old) != 1:
+              raise SystemExit("monitor xmit: data-frame skb_pull validation anchor not found exactly once")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
 
           PY
 
@@ -433,7 +694,7 @@ jobs:
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-UCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+            KCFLAGS="-UCONFIG_NL80211_TESTMODE -Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-n.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
@@ -441,8 +702,34 @@ jobs:
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+            KCFLAGS="-DCONFIG_NL80211_TESTMODE -Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
+          KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtl8188eu_ndo_start_xmit" {print $2}')
+          if [ "$KCFI_ID" != "0000000044e57e43" ]; then
+            echo "::error::ndo_start_xmit KCFI hash mismatch: expected 0000000044e57e43, got ${KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified rtl8188eu_ndo_start_xmit KCFI type ID: $KCFI_ID"
+          TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_usb_recv_tasklet" {print $2}')
+          if [ "$TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
+            echo "::error::usb_recv_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${TASKLET_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified usb_recv_tasklet KCFI type ID: $TASKLET_KCFI_ID"
+          for callback in rtw_cfg80211_monitor_if_xmit_entry mgnt_xmit_entry; do
+            CALLBACK_ID=$(llvm-readelf -sW 8188eu.ko | awk -v sym="__kcfi_typeid_$callback" '$8 == sym {print $2}')
+            if [ -n "$CALLBACK_ID" ] && [ "$CALLBACK_ID" != "0000000044e57e43" ]; then
+              echo "::error::$callback KCFI type ID mismatch: $CALLBACK_ID"
+              exit 1
+            fi
+            echo "$callback KCFI type ID: ${CALLBACK_ID:-not-emitted; compiler type checks remain enabled}"
+          done
+          VERMAGIC="$(strings 8188eu.ko | sed -n 's/^vermagic=//p')"
+          echo "RTL8188EUS vermagic: $VERMAGIC"
+          case "$VERMAGIC" in
+            6.6.127-4k*) ;;
+            *) echo "::error::Module vermagic is not 6.6.127-4k"; exit 1 ;;
+          esac
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
