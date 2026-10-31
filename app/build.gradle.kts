@@ -30,7 +30,10 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file(signingProps.getProperty("KEYSTORE_FILE"))
+            val keystorePath = signingProps.getProperty("KEYSTORE_FILE")
+            if (!keystorePath.isNullOrBlank()) {
+                storeFile = rootProject.file(keystorePath)
+            }
             storePassword = signingProps.getProperty("KEYSTORE_PASSWORD")
             keyAlias = signingProps.getProperty("KEY_ALIAS")
             keyPassword = signingProps.getProperty("KEY_PASSWORD")
@@ -43,6 +46,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
+            // Release builds require signing.properties; debug/PR builds do not.
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
