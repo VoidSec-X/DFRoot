@@ -342,24 +342,22 @@ jobs:
 
           PY
 
-          # Use only the Realme cfg80211 public header. Fetch the one file
-          # from the P1/12+ AndroidB source repository; do not build or import
-          # the vendor kernel tree.
-          mkdir -p "$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net"
+          # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
+          # release tag used as the DDK baseline. The Realme public source
+          # branch currently identifies itself as 6.6.89, so it is not a
+          # trustworthy header source for this 6.6.127 module build.
+          mkdir -p "$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net"
+          ANDROID_CFG="$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net/cfg80211.h"
           curl -fsSL \
-            "https://raw.githubusercontent.com/realme-kernel-opensource/realme_12plus-5G_Narzo70_Narzo70pro_P1-5G-AndroidB-kernel-source/master/include/net/cfg80211.h" \
-            -o "$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net/cfg80211.h"
-          REALME_CFG="$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net/cfg80211.h"
-          test -s "$REALME_CFG"
-          grep -q 'struct cfg80211_ops' "$REALME_CFG"
-          # This minimal DDK image does not ship cfg80211.h in include/net.
-          # Overlay only the Realme cfg80211 public header; do not require a
-          # pre-existing DDK copy and do not copy the rest of the vendor tree.
+            "https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/include/net/cfg80211.h?format=TEXT" \
+            | base64 -d > "$ANDROID_CFG"
+          test -s "$ANDROID_CFG"
+          grep -q 'struct cfg80211_ops' "$ANDROID_CFG"
           mkdir -p "$KDIR/include/net"
           echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
-          echo "Realme cfg80211.h sha256:"
-          sha256sum "$REALME_CFG"
-          install -m 0644 "$REALME_CFG" "$KDIR/include/net/cfg80211.h"
+          echo "Android common 6.6.127 cfg80211.h sha256:"
+          sha256sum "$ANDROID_CFG"
+          install -m 0644 "$ANDROID_CFG" "$KDIR/include/net/cfg80211.h"
           test -s "$KDIR/include/net/cfg80211.h"
 
           # Test the alternate cfg80211_ops layout with CONFIG_NL80211_TESTMODE enabled.
