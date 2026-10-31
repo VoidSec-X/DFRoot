@@ -185,30 +185,6 @@ jobs:
           else:
               print("rtw_wiphy_alloc: set_wiphy_dev already present; skipping")
 
-          # Linux 6.6 cfg80211 validates callback pairs when wiphy_new() is called.
-          # This legacy Realtek ops table intentionally has no OCB implementation;
-          # explicitly leave both OCB callbacks unset so they cannot inherit an
-          # incompatible non-NULL slot from vendor/backported cfg80211 headers.
-          p = Path("os_dep/linux/ioctl_cfg80211.c")
-          source = p.read_text()
-          ops_start = source.find("static struct cfg80211_ops rtw_cfg80211_ops")
-          if ops_start < 0:
-              ops_start = source.find("struct cfg80211_ops rtw_cfg80211_ops")
-          if ops_start < 0:
-              raise SystemExit("ioctl_cfg80211.c: rtw_cfg80211_ops table not found")
-          ops_end = source.find("\\n};", ops_start)
-          if ops_end < 0:
-              raise SystemExit("ioctl_cfg80211.c: end of rtw_cfg80211_ops table not found")
-          ops_block = source[ops_start:ops_end]
-          for callback in (".join_ocb", ".leave_ocb"):
-              # Reject a source-level implementation rather than silently override it.
-              if callback in ops_block:
-                  raise SystemExit(f"rtw_cfg80211_ops unexpectedly implements {callback}; review before patching")
-          # Keep the ops structure layout explicit for this unsupported callback pair.
-          # Designated initializers leave unspecified entries NULL; no fake callback
-          # or ABI-dependent struct member access is introduced here.
-          print("rtw_cfg80211_ops: OCB callback pair remains explicitly unsupported")
-
           # Preserve the upstream rtnl-lock decision: register_netdev() when the
           # caller may acquire RTNL, register_netdevice() when RTNL is already held.
           p = Path("os_dep/linux/os_intfs.c")
