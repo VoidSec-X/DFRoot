@@ -167,9 +167,19 @@ jobs:
           old = """\tpwdev_priv = adapter_wdev_data(padapter);
           \tpmlmepriv = &padapter->mlmepriv;"""
           new = """\tif ((request->n_ssids && !request->ssids) ||
-          \t    (request->n_channels && !request->channels)) {
+          \t    (request->n_channels && !request->channels) ||
+          \t    request->n_ssids > RTW_SSID_SCAN_AMOUNT ||
+          \t    request->n_channels > RTW_CHANNEL_SCAN_AMOUNT) {
           \t\tret = -EINVAL;
           \t\tgoto exit;
+          \t}
+          \t/* Validate every channel before the P2P social-channel fast path
+          \t * dereferences channels[0..2]. */
+          \tfor (i = 0; i < request->n_channels; i++) {
+          \t\tif (!request->channels[i]) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
           \t}
           \tpwdev_priv = adapter_wdev_data(padapter);
           \tpmlmepriv = &padapter->mlmepriv;"""
