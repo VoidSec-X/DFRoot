@@ -392,41 +392,40 @@ jobs:
 
           PY
 
-          # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
-          # release tag used as the DDK baseline. The Realme public source
-          # branch currently identifies itself as 6.6.89, so it is not a
-          # trustworthy header source for this 6.6.127 module build.
-          mkdir -p "$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net"
-          ANDROID_CFG="$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net/cfg80211.h"
-          curl -fsSL \
-            "https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/include/net/cfg80211.h?format=TEXT" \
-            | base64 -d > "$ANDROID_CFG"
-          test -s "$ANDROID_CFG"
-          grep -q 'struct cfg80211_ops' "$ANDROID_CFG"
-          mkdir -p "$KDIR/include/net"
+          # Use the complete DDK-generated kernel interface. Never splice a single
+          # header from another tree, because that creates a mixed kernel ABI.
           echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
-          echo "Android common 6.6.127 cfg80211.h sha256:"
-          sha256sum "$ANDROID_CFG"
-          install -m 0644 "$ANDROID_CFG" "$KDIR/include/net/cfg80211.h"
-          test -s "$KDIR/include/net/cfg80211.h"
-
-          # The handset kernel has CONFIG_NL80211_TESTMODE=y. Align the DDK's
-          # actual Kconfig state (not just KCFLAGS/autoconf.h) before compiling,
-          # so cfg80211_ops has the same conditional members as the target kernel.
+          echo "DDK compiler: $(clang --version | head -n1)"
           test -f "$KDIR/.config"
-          test -x "$KDIR/scripts/config"
-          "$KDIR/scripts/config" --file "$KDIR/.config" --enable NL80211_TESTMODE
-          make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
-          grep -q '^CONFIG_NL80211_TESTMODE=y
+          test -f "$KDIR/include/generated/autoconf.h"
+          test -f "$KDIR/include/config/auto.conf"
+          echo "Relevant DDK configuration:"
+          grep -E '^(CONFIG_CFI_CLANG|CONFIG_CFI_PERMISSIVE|CONFIG_NL80211_TESTMODE|CONFIG_MODVERSIONS|CONFIG_LTO_CLANG)=' "$KDIR/.config" || true
+          grep -E 'CONFIG_CFI_CLANG|CONFIG_NL80211_TESTMODE|CONFIG_MODVERSIONS|CONFIG_LTO_CLANG' "$KDIR/include/generated/autoconf.h" || true
+
+          # Do not fake CONFIG_NL80211_TESTMODE with KCFLAGS. Require the
+          # generated config to match the handset configuration.
+          if ! grep -q '^CONFIG_NL80211_TESTMODE=y$' "$KDIR/.config"; then
+            echo "::error::DDK .config is not CONFIG_NL80211_TESTMODE=y; refusing mixed cfg80211 ABI"
+            exit 1
+          fi
+          if ! grep -q '^#define CONFIG_NL80211_TESTMODE 1$' "$KDIR/include/generated/autoconf.h"; then
+            echo "::error::generated autoconf.h lacks CONFIG_NL80211_TESTMODE"
+            exit 1
+          fi
+
+          # Catch callback pointer mismatches, retain module KCFI metadata,
+          # and report the generated callback type ID for verification.
           mkdir -p "$GITHUB_WORKSPACE/out"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
             KCFLAGS="-Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
-          llvm-readelf -h 8188eu.ko | grep -q 'AArch64'
-          llvm-readelf -p .modinfo 8188eu.ko | grep -q 'vermagic=6.6.127-4k'
-          llvm-nm -n 8188eu.ko | grep -q 'rtw_xmit_entry'
+          llvm-readelf -h 8188eu.ko | grep -q AArch64
+          llvm-readelf -p .modinfo 8188eu.ko
+          llvm-nm -a 8188eu.ko | grep -E 'rtw_xmit_entry|__kcfi_typeid_rtw_xmit_entry'
+          llvm-readelf -S 8188eu.ko | grep -Ei 'kcfi|llvm'
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
           sha256sum "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
