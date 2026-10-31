@@ -1,0 +1,549 @@
+name: rtl8188eus-driver-only
+
+on:
+  push:
+    branches: [master, main, 'fix/rtl8188eus-kcfi-abi-android15-66']
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build-rtl8188eus:
+    name: RTL8188EUS / Android 15 6.6
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build RTL8188EUS module
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 --branch v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
+          cd rtl8188eu
+
+          # Use the same DDK kernel build environment as dfroot.ko.
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              source = p.read_text()
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
+              p.write_text(source.replace(old, new, 1))
+
+          # Convert zero/one-element trailing arrays to C flexible arrays.
+          p = Path("include/ieee80211.h")
+          source = p.read_text()
+          start = source.index("struct ieee80211_info_element {")
+          end = source.index("} __attribute__((packed));", start)
+          block = source[start:end]
+          if "u8 data[0];" not in block:
+              raise SystemExit("ieee80211_info_element: data[0] declaration not found")
+          source = source[:start] + block.replace("u8 data[0];", "u8 data[];", 1) + source[end:]
+          p.write_text(source)
+
+          # Convert the zero-length crypt.key tail to a C flexible array.
+          # This preserves the ioctl wire layout while avoiding Clang 6.6
+          # treating key[16]/key[24] offsets as out-of-bounds.
+          p = Path("include/ieee80211.h")
+          source = p.read_text()
+          start = source.index("struct ieee_param {")
+          end = source.index("} ieee_param;", start)
+          block = source[start:end]
+          if "u8 key[0];" not in block:
+              raise SystemExit("ieee_param crypt.key: key[0] declaration not found")
+          source = source[:start] + block.replace("u8 key[0];", "u8 key[];", 1) + source[end:]
+          p.write_text(source)
+
+          p = Path("include/wlan_bssdef.h")
+          source = p.read_text()
+          marker = "struct _NDIS_802_11_VARIABLE_IEs"
+          start = source.index(marker)
+          end = source.index("};", start)
+          block = source[start:end]
+          if "data[1]" not in block:
+              raise SystemExit("NDIS variable IE: data[1] declaration not found")
+          block = block.replace("data[1]", "data[]", 1)
+          p.write_text(source[:start] + block + source[end:])
+
+          # Add explicit breaks after conditional RSN returns.
+          # Some upstream revisions contain an additional RSN case, so patch
+          # each matching return branch instead of assuming a fixed case count.
+          p = Path("core/rtw_wlan_util.c")
+          lines = p.read_text().splitlines()
+          inserts = []
+          for n, line in enumerate(lines):
+              if line.strip() != "case _RSN_IE_2_:":
+                  continue
+              stop = next((m for m in range(n + 1, len(lines))
+                           if lines[m].strip().startswith(("case ", "default:"))), len(lines))
+              for m in range(n + 1, stop):
+                  if lines[m].strip() in ("return _TRUE;", "return _FALSE;"):
+                      if m + 1 >= len(lines) or lines[m + 1].strip() != "break;":
+                          indent = line[:len(line) - len(line.lstrip())]
+                          inserts.append((m + 1, indent + "break;"))
+                      break
+          if not inserts:
+              raise SystemExit("no RSN conditional return branches found to patch")
+          for index, statement in reversed(inserts):
+              lines.insert(index, statement)
+          p.write_text("\n".join(lines) + "\n")
+
+          # Keep the upstream wiphy interface; this build's driver config
+          # defines cfg80211, but does not select RTW_SINGLE_WIPHY. The
+          # adapter member is present under CONFIG_IOCTL_CFG80211 alone in
+          # non-single-wiphy mode. Select this mode explicitly to match
+          # adapter_to_wiphy(adapter) == adapter->wiphy.
+          p = Path("include/autoconf.h")
+          source = p.read_text()
+          if "#define CONFIG_IOCTL_CFG80211" not in source:
+              import re
+              source, count = re.subn(r"^\s*/\*\s*#define CONFIG_IOCTL_CFG80211\s*\*/",
+                                     "#define CONFIG_IOCTL_CFG80211", source, count=1, flags=re.M)
+              if count != 1:
+                  raise SystemExit("autoconf.h: cannot enable CONFIG_IOCTL_CFG80211")
+          if "#define RTW_SINGLE_WIPHY" in source:
+              raise SystemExit("RTW_SINGLE_WIPHY unexpectedly enabled; refusing to change wiphy mode")
+
+          # Keep CONFIG_P2P enabled. The station driver retains its upstream
+          # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
+
+          # The RTL8188EUS ops table places set_mac_acl inside CONFIG_AP_MODE,
+          # but preinit used to advertise max_acl_mac_addrs whenever ACL was enabled.
+          # cfg80211 rejects wiphy_register() when the limit is nonzero and the
+          # callback is absent. ACL is an AP feature, so advertise it only with AP mode.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = """#if CONFIG_RTW_MACADDR_ACL && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+          \twiphy->max_acl_mac_addrs = NUM_ACL;
+          #endif"""
+          new = """#if defined(CONFIG_AP_MODE) && CONFIG_RTW_MACADDR_ACL && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+          \twiphy->max_acl_mac_addrs = NUM_ACL;
+          #endif"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: cannot gate max_acl_mac_addrs on CONFIG_AP_MODE")
+          p.write_text(source.replace(old, new, 1))
+
+          # Add precise runtime diagnostics around cfg80211/netdev registration.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = "\treturn wiphy_register(wiphy);"
+          new = """\t{
+          \t\tint ret = wiphy_register(wiphy);
+          \t\tpr_err("DFROOT: wiphy_register(%p) returned %d\\n", wiphy, ret);
+          \t\treturn ret;
+          \t}"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_register return")
+          source = source.replace(old, new, 1)
+          old = "\twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"
+          new = """\tpr_err("DFROOT: ops remain=%p cancel_remain=%p start_p2p=%p stop_p2p=%p set_mac_acl=%p\\n",
+          \t\t (void *)rtw_cfg80211_ops.remain_on_channel,
+          \t\t (void *)rtw_cfg80211_ops.cancel_remain_on_channel,
+          \t\t (void *)rtw_cfg80211_ops.start_p2p_device,
+          \t\t (void *)rtw_cfg80211_ops.stop_p2p_device,
+          \t\t (void *)rtw_cfg80211_ops.set_mac_acl);
+          \twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_new call")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          old = """\tif (rtnl_lock_needed)
+          \t\tret = (register_netdev(ndev) == 0) ? _SUCCESS : _FAIL;
+          \telse
+          \t\tret = (register_netdevice(ndev) == 0) ? _SUCCESS : _FAIL;"""
+          new = """\tif (rtnl_lock_needed)
+          \t\tret = register_netdev(ndev);
+          \telse
+          \t\tret = register_netdevice(ndev);
+          \tif (ret) {
+          \t\tpr_err("DFROOT: netdev registration failed name=%s errno=%d\\n",
+          \t\t\tndev->name, ret);
+          \t\tret = _FAIL;
+          \t} else {
+          \t\tpr_err("DFROOT: netdev registered name=%s\\n", ndev->name);
+          \t\tret = _SUCCESS;
+          \t}"""
+          if source.count(old) != 1:
+              raise SystemExit("os_intfs.c: cannot locate netdev registration block")
+          p.write_text(source.replace(old, new, 1))
+
+          # Android 15 exports filp_open() and kernel_read() in the VFS namespace.
+          # Import that namespace so modpost metadata permits loading this driver.
+          p = Path("os_dep/osdep_service.c")
+          source = p.read_text()
+          import_stmt = "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);"
+          if import_stmt not in source:
+              source = source.rstrip() + "\n\n" + import_stmt + "\n"
+          p.write_text(source)
+
+          # Linux 6.x cfg80211 needs the wiphy parent device set before registration.
+          # rtw_wiphy_alloc() lives in ioctl_cfg80211.c; it already receives the dvobj
+          # device, so patch its real allocation implementation, not os_intfs.c.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          marker = "struct wiphy *rtw_wiphy_alloc(_adapter *padapter, struct device *dev)\n{"
+          start = source.find(marker)
+          if start < 0:
+              raise SystemExit("ioctl_cfg80211.c: rtw_wiphy_alloc definition not found")
+          end = source.find("\n}", start)
+          if end < 0:
+              raise SystemExit("ioctl_cfg80211.c: end of rtw_wiphy_alloc not found")
+          block = source[start:end]
+          if "set_wiphy_dev(wiphy, dev);" not in block:
+              anchor = "\twiphy = wiphy_new("
+              if anchor not in block:
+                  raise SystemExit("rtw_wiphy_alloc: wiphy_new allocation not found")
+              block = block.replace(anchor, anchor, 1)
+              alloc_end = block.find(";", block.find(anchor))
+              if alloc_end < 0:
+                  raise SystemExit("rtw_wiphy_alloc: wiphy_new statement end not found")
+              block = (block[:alloc_end + 1] +
+                       "\n#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))\n"
+                       "\tset_wiphy_dev(wiphy, dev);\n#endif" +
+                       block[alloc_end + 1:])
+              source = source[:start] + block + source[end:]
+              p.write_text(source)
+          else:
+              print("rtw_wiphy_alloc: set_wiphy_dev already present; skipping")
+
+
+          # Linux 6.6 removed the legacy association/disassociation helpers.
+          # Replace the existing compatibility macro in-place, keeping exactly
+          # one definition and preserving the original cfg80211 notification flow.
+          p = Path("os_dep/linux/ioctl_cfg80211.h")
+          source = p.read_text()
+          old_block = """#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0))  && !defined(COMPAT_KERNEL_RELEASE)
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, buf, len)
+          #else
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
+          #endif"""
+          new_block = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+          #define rtw_cfg80211_send_rx_assoc(adapter, arg_bss, arg_buf, arg_len) \\
+          do { \\
+              struct cfg80211_rx_assoc_resp assoc_resp = { \\
+                  .buf = (arg_buf), \\
+                  .len = (arg_len), \\
+                  .req_ies = NULL, \\
+                  .req_ies_len = 0, \\
+              }; \\
+              assoc_resp.links[0].bss = (arg_bss); \\
+              cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
+          } while (0)
+          #elif (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0)) && !defined(COMPAT_KERNEL_RELEASE)
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, buf, len)
+          #else
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
+          #endif"""
+          if source.count(old_block) != 1:
+              raise SystemExit("ioctl_cfg80211.h: expected original association macro block exactly once")
+          source = source.replace(old_block, new_block, 1)
+          p.write_text(source)
+
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = "cfg80211_send_disassoc(padapter->pnetdev, mgmt_buf, frame_len);"
+          new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+          	cfg80211_tx_mlme_mgmt(padapter->pnetdev, mgmt_buf, frame_len, false);
+          #else
+          	cfg80211_send_disassoc(padapter->pnetdev, mgmt_buf, frame_len);
+          #endif"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: expected one cfg80211_send_disassoc call")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
+          # PHYDM TXAGC offset windows are bounded; OR made every value valid.
+          p = Path("hal/phydm/phydm_api.c")
+          source = p.read_text()
+          old = "if (power_offset > -8 || power_offset < 7)"
+          new = "if (power_offset > -8 && power_offset < 7)"
+          if source.count(old) != 1:
+              raise SystemExit("phydm_api.c: expected one 11N TXAGC range condition")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
+          # Fix impossible PHYDM condition: a value cannot be both != 1 and != 2.
+          p = Path("hal/phydm/phydm_debug.c")
+          source = p.read_text()
+          old = "if (rx_ht != 2 || rx_ht != 1)"
+          new = "if (rx_ht != 2 && rx_ht != 1)"
+          if source.count(old) != 1:
+              raise SystemExit("phydm_debug.c: expected one impossible rx_ht condition")
+          p.write_text(source.replace(old, new, 1))
+
+          # Clang 6.6 diagnoses redundant parentheses around this comparison.
+          p = Path("hal/rtl8188e/usb/usb_halinit.c")
+          source = p.read_text()
+          old = "if ((IS_FULL_SPEED_USB(Adapter))"
+          new = "if (IS_FULL_SPEED_USB(Adapter)"
+          if source.count(old) != 1:
+              raise SystemExit("usb_halinit.c: expected exactly one redundant-parentheses condition")
+          p.write_text(source.replace(old, new, 1))
+
+          # Clang 6.6 treats the intentional-looking spinlock switch fallthrough
+          # as an error. These cases have no shared cleanup; terminate explicitly.
+          p = Path("core/rtw_odm.c")
+          source = p.read_text()
+          for call in (
+              "_enter_critical_bh(&pHalData->IQKSpinLock, &irqL);",
+              "_exit_critical_bh(&pHalData->IQKSpinLock, &irqL);",
+          ):
+              old = call + "\n\tdefault:"
+              new = call + "\n\t\tbreak;\n\tdefault:"
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"rtw_odm.c: expected one {call} before default, found {count}")
+              source = source.replace(old, new, 1)
+          p.write_text(source)
+
+          # Keep the Realtek legacy TX helper intact. Export a dedicated
+          # ndo_start_xmit entry whose return type is the kernel's enum netdev_tx.
+          # The panic reports expected KCFI type ID 0x44e57e43; plain int produces
+          # 0xab1f26f7 even when the argument types are identical.
+          p = Path("include/xmit_osdep.h")
+          source = p.read_text()
+          legacy = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          prototype = "extern enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev);"
+          # The Linux declaration is present in upstream v5.3.9, but the
+          # FreeBSD copy is also identical. Anchor the insertion to the
+          # PLATFORM_LINUX block so the Linux prototype is never ambiguous.
+          start = source.find("#ifdef PLATFORM_LINUX")
+          end = source.find("#endif /* PLATFORM_LINUX */", start)
+          if start < 0 or end < 0:
+              raise SystemExit("xmit_osdep.h: PLATFORM_LINUX declaration block not found")
+          block = source[start:end]
+          if prototype not in block:
+              if block.count(legacy) != 1:
+                  raise SystemExit("xmit_osdep.h: expected one Linux legacy TX prototype")
+              block = block.replace(legacy, legacy + "\n" + prototype, 1)
+              source = source[:start] + block + source[end:]
+          p.write_text(source)
+
+          p = Path("os_dep/linux/xmit_linux.c")
+          source = p.read_text()
+          legacy_def = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          wrapper = """enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev)
+          {
+              rtw_xmit_entry((_pkt *)skb, (_nic_hdl)dev);
+              return NETDEV_TX_OK;
+          }"""
+          if source.count(legacy_def) != 1:
+              raise SystemExit("xmit_linux.c: expected original legacy TX definition exactly once")
+          if "rtl8188eu_ndo_start_xmit(" not in source:
+              source = source.rstrip() + "\n\n" + wrapper + "\n"
+          p.write_text(source)
+
+          # Both physical and virtual station interfaces use the typed callback.
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          old = ".ndo_start_xmit = rtw_xmit_entry,"
+          new = ".ndo_start_xmit = rtl8188eu_ndo_start_xmit,"
+          if source.count(old) != 2:
+              raise SystemExit(f"os_intfs.c: expected two legacy ndo_start_xmit assignments, found {source.count(old)}")
+          p.write_text(source.replace(old, new))
+
+          # The monitor and hostapd management interfaces have their own
+          # ndo_start_xmit callbacks; make their return type the exact enum too.
+          for path, old, new in (
+              ("os_dep/linux/ioctl_cfg80211.c",
+               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)",
+               "static enum netdev_tx rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
+              ("os_dep/linux/mlme_linux.c",
+               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)",
+               "static enum netdev_tx mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
+          ):
+              p = Path(path)
+              source = p.read_text()
+              if source.count(old) == 1:
+                  source = source.replace(old, new, 1)
+              elif source.count(new) != 1:
+                  raise SystemExit(f"{path}: callback signature not found or ambiguous")
+              p.write_text(source)
+          # Fix the TX tasklet callback reported by the device's CFI panic.
+          # tasklet_init() requires void (*)(unsigned long). Upstream registered
+          # a void (*)(void *) function through an incompatible cast.
+          p = Path("include/rtl8188e_xmit.h")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv);"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv);"
+          if source.count(old) != 1:
+              raise SystemExit("rtl8188e_xmit.h: TX tasklet prototype not found exactly once")
+          p.write_text(source.replace(old, new, 1))
+
+          p = Path("hal/rtl8188e/usb/rtl8188eu_xmit.c")
+          source = p.read_text()
+          old = """tasklet_init(&pxmitpriv->xmit_tasklet,
+          		     (void(*)(unsigned long))rtl8188eu_xmit_tasklet,
+          		     (unsigned long)padapter);"""
+          new = """tasklet_init(&pxmitpriv->xmit_tasklet,
+          		     rtl8188eu_xmit_tasklet,
+          		     (unsigned long)padapter);"""
+          if source.count(old) != 1:
+              raise SystemExit("rtl8188eu_xmit.c: TX tasklet registration not found exactly once")
+          p.write_text(source.replace(old, new, 1))
+
+          # The TX tasklet body is in usb_ops_linux.c (not rtl8188e_xmit.c).
+          p = Path("hal/rtl8188e/usb/usb_ops_linux.c")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv)"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv)"
+          if source.count(old) != 1:
+              raise SystemExit("usb_ops_linux.c: TX tasklet implementation not found exactly once")
+          source = source.replace(old, new, 1)
+          old = "_adapter *padapter = (_adapter *)priv;"
+          new = "_adapter *padapter = (_adapter *)(uintptr_t)priv;"
+          if source.count(old) < 1:
+              raise SystemExit("usb_ops_linux.c: TX tasklet adapter conversion not found")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
+          # Ensure declaration, definition and tasklet_init registration stay aligned.
+          grep -Fq 'void rtl8188eu_xmit_tasklet(unsigned long priv);' include/rtl8188e_xmit.h
+          grep -Fq 'void rtl8188eu_xmit_tasklet(unsigned long priv)' hal/rtl8188e/usb/usb_ops_linux.c
+          grep -Fq 'rtl8188eu_xmit_tasklet,' hal/rtl8188e/usb/rtl8188eu_xmit.c
+          ! grep -Fq '(void(*)(unsigned long))rtl8188eu_xmit_tasklet' hal/rtl8188e/usb/rtl8188eu_xmit.c
+
+          # Verify the TX callback that actually faulted on-device. Its KCFI
+          # type ID must match the legacy tasklet_init callback type, 0xaecee44b.
+                    # TX callback ABI check, alongside the existing RX tasklet check.
+                    # Linux 6.6 has both legacy tasklet_init(unsigned long) and
+          # modern tasklet_setup(struct tasklet_struct *) callbacks.
+          # This driver uses tasklet_init, so retain it and match its callback ABI.
+          p = Path("include/usb_ops_linux.h")
+          source = p.read_text()
+          import re
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\(\s*[^;]+\s*\)\s*;",
+              "void usb_recv_tasklet(unsigned long priv);",
+              source, count=1)
+          if count != 1:
+              raise SystemExit("usb_ops_linux.h: recv tasklet prototype not found exactly once")
+          p.write_text(source)
+
+          p = Path("os_dep/linux/usb_ops_linux.c")
+          source = p.read_text()
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\(\s*[^)]*\)",
+              "void usb_recv_tasklet(unsigned long priv)",
+              source)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected 2 recv callback definitions, changed {count}")
+          # tasklet_init's data parameter carries the adapter pointer.
+          source, count = re.subn(
+              r"_adapter\s*\*\s*padapter\s*=\s*\(_adapter\s*\*\)\s*priv\s*;",
+              "_adapter *padapter = (_adapter *)(uintptr_t)priv;",
+              source, count=2)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected 2 adapter-data conversions, changed {count}")
+          p.write_text(source)
+
+          p = Path("hal/hal_hci/hal_usb.c")
+          source = p.read_text()
+          pattern = re.compile(
+              r"(tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*)"
+              r"\(\s*void\s*\(\s*\*\s*\)\s*\(\s*unsigned\s+long\s*\)\s*\)\s*"
+              r"usb_recv_tasklet",
+              re.S)
+          source, count = pattern.subn(r"\1usb_recv_tasklet", source, count=1)
+          if count != 1:
+              direct = re.search(
+                  r"tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*usb_recv_tasklet\s*,",
+                  source, re.S)
+              if not direct:
+                  raise SystemExit("hal_usb.c: legacy recv tasklet_init callback not found")
+          p.write_text(source)
+
+          PY
+
+          # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
+          # release tag used as the DDK baseline. The Realme public source
+          # branch currently identifies itself as 6.6.89, so it is not a
+          # trustworthy header source for this 6.6.127 module build.
+          mkdir -p "$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net"
+          ANDROID_CFG="$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net/cfg80211.h"
+          curl -fsSL \
+            "https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/include/net/cfg80211.h?format=TEXT" \
+            | base64 -d > "$ANDROID_CFG"
+          test -s "$ANDROID_CFG"
+          grep -q 'struct cfg80211_ops' "$ANDROID_CFG"
+          mkdir -p "$KDIR/include/net"
+          echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
+          echo "Android common 6.6.127 cfg80211.h sha256:"
+          sha256sum "$ANDROID_CFG"
+          install -m 0644 "$ANDROID_CFG" "$KDIR/include/net/cfg80211.h"
+          test -s "$KDIR/include/net/cfg80211.h"
+
+          # Test the alternate cfg80211_ops layout with CONFIG_NL80211_TESTMODE enabled.
+          # Remove any generated define first; KCFLAGS below explicitly enables
+          # the two testmode callback slots for this driver build.
+          KCONFIG_AUTO="$KDIR/include/generated/autoconf.h"
+          if [ -f "$KCONFIG_AUTO" ]; then
+            sed -i '/^#define CONFIG_NL80211_TESTMODE\b/d' "$KCONFIG_AUTO"
+            if grep -q '^#define CONFIG_NL80211_TESTMODE\b' "$KCONFIG_AUTO"; then
+              echo "::error::CONFIG_NL80211_TESTMODE remains enabled in generated autoconf.h"
+              exit 1
+            fi
+          else
+            echo "::error::Missing $KCONFIG_AUTO; cannot enforce device cfg80211 layout"
+            exit 1
+          fi
+          echo "Driver cfg80211 layout: CONFIG_NL80211_TESTMODE=y (alternate ABI test)"
+          grep -n 'CONFIG_NL80211_TESTMODE' "$KCONFIG_AUTO" || true
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+
+          # Build both possible cfg80211_ops layouts. The supplied config has
+          # CFG80211 unset although the device loads a vendor cfg80211 module,
+          # so it cannot identify that module's TESTMODE layout.
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-UCONFIG_NL80211_TESTMODE -Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+          test -s 8188eu.ko
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-n.ko"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-DCONFIG_NL80211_TESTMODE -Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+          test -s 8188eu.ko
+          KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtl8188eu_ndo_start_xmit" {print $2}')
+          if [ "$KCFI_ID" != "0000000044e57e43" ]; then
+            echo "::error::ndo_start_xmit KCFI hash mismatch: expected 0000000044e57e43, got ${KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified rtl8188eu_ndo_start_xmit KCFI type ID: $KCFI_ID"
+          TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_usb_recv_tasklet" {print $2}')
+          if [ "$TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
+            echo "::error::usb_recv_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${TASKLET_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified usb_recv_tasklet KCFI type ID: $TASKLET_KCFI_ID"
+          TX_TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtl8188eu_xmit_tasklet" {print $2}')
+          if [ "$TX_TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
+            echo "::error::rtl8188eu_xmit_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${TX_TASKLET_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified rtl8188eu_xmit_tasklet KCFI type ID: $TX_TASKLET_KCFI_ID"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+      - name: Upload RTL8188EUS.ko
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtl8188eus-android15-6.6
+          path: out/8188eu-android15-6.6*.ko
+          if-no-files-found: error
