@@ -159,6 +159,47 @@ jobs:
               raise SystemExit("autoconf.h: expected exactly one CONFIG_P2P define")
           p.write_text(source)
 
+          # This build disables CONFIG_P2P for cfg80211 wiphy validation.
+          # Guard the legacy P2P timer pointer as the corresponding adapter
+          # member is compiled out when CONFIG_P2P is disabled.
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          old = "\tstruct wifidirect_info *pwdinfo = &padapter->wdinfo;"
+          new = "#ifdef CONFIG_P2P\n\tstruct wifidirect_info *pwdinfo = &padapter->wdinfo;\n#endif"
+          if source.count(old) != 1:
+              raise SystemExit("os_intfs.c: expected one P2P wdinfo timer declaration")
+          source = source.replace(old, new, 1)
+          # Guard P2P-only timer cancellations that consume pwdinfo.
+          start = source.index("void rtw_cancel_all_timer(_adapter *padapter)")
+          end = source.find("\n}", start)
+          if end < 0:
+              raise SystemExit("os_intfs.c: rtw_cancel_all_timer end not found")
+          block = source[start:end]
+          if "pwdinfo" in block:
+              lines = block.splitlines()
+              out = []
+              in_p2p = False
+              for line in lines:
+                  if "pwdinfo" in line and not in_p2p:
+                      out.append("#ifdef CONFIG_P2P")
+                      in_p2p = True
+                  out.append(line)
+                  if in_p2p and line.strip().endswith(";"):
+                      # Close after the contiguous P2P timer group ends.
+                      pass
+              if in_p2p:
+                  # The wdinfo-backed timer calls are the contiguous lines
+                  # immediately following the declaration; guard only those.
+                  first = next(i for i,l in enumerate(lines) if "pwdinfo" in l)
+                  last = first
+                  while last + 1 < len(lines) and ("pwdinfo" in lines[last+1] or
+                        lines[last+1].strip().startswith("_cancel_timer_ex")):
+                      last += 1
+                  lines = lines[:first] + ["#ifdef CONFIG_P2P"] + lines[first:last+1] + ["#endif"] + lines[last+1:]
+                  block = "\n".join(lines)
+                  source = source[:start] + block + source[end:]
+          p.write_text(source)
+
           # Android 15 exports filp_open() and kernel_read() in the VFS namespace.
           # Import that namespace so modpost metadata permits loading this driver.
           p = Path("os_dep/osdep_service.c")
