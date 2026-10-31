@@ -155,6 +155,40 @@ jobs:
               source = source.rstrip() + "\n\n" + import_stmt + "\n"
           p.write_text(source)
 
+          # Linux 6.x cfg80211 expects the wiphy to be associated with its
+          # parent device before registration. Keep the existing wiphy allocation
+          # and lifecycle; set the device immediately after allocation.
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          if "set_wiphy_dev(pwiphy, dvobj_to_dev(dvobj));" not in source:
+              import re
+              pattern = re.compile(
+                  r"(pwiphy\s*=\s*rtw_wiphy_alloc\([^;]+;)"
+              )
+              source, count = pattern.subn(
+                  r"\1\n#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))\n"
+                  r"\t\tset_wiphy_dev(pwiphy, dvobj_to_dev(dvobj));\n#endif",
+                  source,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit("os_intfs.c: could not locate unique rtw_wiphy_alloc assignment")
+              p.write_text(source)
+          else:
+              print("os_intfs.c: set_wiphy_dev already present; skipping")
+
+          # cfg80211 netdev registration on Linux 6.x must retain dynamic naming.
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          if "res = register_netdev(pnetdev);" in source:
+              print("os_intfs.c: register_netdev(pnetdev) already uses dynamic naming")
+          elif "res = register_netdevice(pnetdev);" in source:
+              source = source.replace("res = register_netdevice(pnetdev);",
+                                      "res = register_netdev(pnetdev);", 1)
+              p.write_text(source)
+          else:
+              print("os_intfs.c: no legacy netdevice registration call matched; leaving unchanged")
+
           # Linux 6.6 removed the legacy association/disassociation helpers.
           # Replace the existing compatibility macro in-place, keeping exactly
           # one definition and preserving the original cfg80211 notification flow.
