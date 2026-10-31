@@ -51,17 +51,22 @@ jobs:
           make -C "$KDIR" M="$PWD" clean
           find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
 
-          # Clang 18+ treats the legacy zero-length IE payload as a bounds error.
-          # Convert only the information-element payload to a C flexible array.
+          # Replace the legacy zero-length payload only in ieee80211_info_element.
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("include/ieee80211.h")
-          s = p.read_text()
-          old = "struct ieee80211_info_element {\\n\\tu8 id;\\n\\tu8 len;\\n\\tu8 data[0];\\n};"
-          new = "struct ieee80211_info_element {\\n\\tu8 id;\\n\\tu8 len;\\n\\tu8 data[];\\n};"
-          if old not in s:
-              raise SystemExit("Expected ieee80211_info_element definition was not found; refusing an ambiguous patch")
-          p.write_text(s.replace(old, new, 1))
+          import re
+
+          path = Path("include/ieee80211.h")
+          source = path.read_text()
+          pattern = r"(struct\\s+ieee80211_info_element\\s*\\{\\s*u8\\s+id\\s*;\\s*u8\\s+len\\s*;\\s*)u8\\s+data\\s*\\[\\s*0\\s*\\]\\s*;"
+          patched, count = re.subn(pattern, r"\\1u8 data[];", source, count=1)
+          if count != 1:
+              raise SystemExit("Could not uniquely patch ieee80211_info_element.data[0]")
+          path.write_text(patched)
+
+          check = path.read_text()
+          if not re.search(r"struct\\s+ieee80211_info_element\\s*\\{[^}]*u8\\s+data\\s*\\[\\s*\\]", check, re.S):
+              raise SystemExit("Flexible-array verification failed")
           PY
 
           make -C "$KDIR" M="$PWD" \
