@@ -146,6 +146,44 @@ jobs:
               raise SystemExit("RTW_SINGLE_WIPHY unexpectedly enabled; refusing to change wiphy mode")
           p.write_text(source)
 
+          # Linux 6.6 removed cfg80211_send_rx_assoc()/cfg80211_send_disassoc().
+          # Keep the driver's existing notification paths, but provide 6.6
+          # equivalents using the public cfg80211 APIs and original frame.
+          p = Path("os_dep/linux/ioctl_cfg80211.h")
+          source = p.read_text()
+          marker = "#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0))"
+          if marker not in source:
+              raise SystemExit("ioctl_cfg80211.h: association compatibility marker missing")
+          wrapper = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) \\
+          	do { \\
+          		struct cfg80211_rx_assoc_resp assoc_resp = { \\
+          			.buf = (buf), \\
+          			.len = (len), \\
+          			.req_ies = NULL, \\
+          			.req_ies_len = 0, \\
+          			.links[0].bss = (bss), \\
+          		}; \\
+          		cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
+          	} while (0)
+          #else
+          """
+          source = source.replace(marker, wrapper + marker, 1)
+          p.write_text(source)
+
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = "cfg80211_send_disassoc(padapter->pnetdev, mgmt_buf, frame_len);"
+          new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+          	cfg80211_tx_mlme_mgmt(padapter->pnetdev, mgmt_buf, frame_len, false);
+          #else
+          	cfg80211_send_disassoc(padapter->pnetdev, mgmt_buf, frame_len);
+          #endif"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: expected one cfg80211_send_disassoc call")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
           # Clang 6.6 treats the intentional-looking spinlock switch fallthrough
           # as an error. These cases have no shared cleanup; terminate explicitly.
           p = Path("core/rtw_odm.c")
