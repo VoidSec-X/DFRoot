@@ -383,7 +383,7 @@ jobs:
 
           # Build both possible cfg80211_ops layouts. The supplied config has
           # CFG80211 unset although the device loads a vendor cfg80211 module,
-          # so it cannot identify that module\\x27s TESTMODE layout.
+          # so it cannot identify that module's TESTMODE layout.
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
@@ -395,7 +395,7 @@ jobs:
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG802 CFG80211" modules
+            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
