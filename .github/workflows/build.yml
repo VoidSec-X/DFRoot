@@ -148,6 +148,50 @@ jobs:
           # Keep CONFIG_P2P enabled. The station driver retains its upstream
           # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
 
+          # Add precise runtime diagnostics around cfg80211/netdev registration.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = "\treturn wiphy_register(wiphy);"
+          new = """\t{
+          \t\tint ret = wiphy_register(wiphy);
+          \t\tRTW_INFO("DFROOT: wiphy_register(%p) returned %d\\n", wiphy, ret);
+          \t\treturn ret;
+          \t}"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_register return")
+          source = source.replace(old, new, 1)
+          old = "\twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"
+          new = """\tRTW_INFO("DFROOT: cfg80211 P2P callbacks start=%p stop=%p\\n",
+          \t\t rtw_cfg80211_ops.start_p2p_device,
+          \t\t rtw_cfg80211_ops.stop_p2p_device);
+          \twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_new call")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          old = """\tif (rtnl_lock_needed)
+          \t\tret = (register_netdev(ndev) == 0) ? _SUCCESS : _FAIL;
+          \telse
+          \t\tret = (register_netdevice(ndev) == 0) ? _SUCCESS : _FAIL;"""
+          new = """\tif (rtnl_lock_needed)
+          \t\tret = register_netdev(ndev);
+          \telse
+          \t\tret = register_netdevice(ndev);
+          \tif (ret) {
+          \t\tRTW_ERR("DFROOT: netdev registration failed name=%s errno=%d\\n",
+          \t\t\tndev->name, ret);
+          \t\tret = _FAIL;
+          \t} else {
+          \t\tRTW_INFO("DFROOT: netdev registered name=%s\\n", ndev->name);
+          \t\tret = _SUCCESS;
+          \t}"""
+          if source.count(old) != 1:
+              raise SystemExit("os_intfs.c: cannot locate netdev registration block")
+          p.write_text(source.replace(old, new, 1))
+
           # Android 15 exports filp_open() and kernel_read() in the VFS namespace.
           # Import that namespace so modpost metadata permits loading this driver.
           p = Path("os_dep/osdep_service.c")
