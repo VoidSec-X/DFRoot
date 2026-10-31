@@ -41,9 +41,14 @@ jobs:
           test -f "$KERNEL_SRC/Makefile"
           test -f "$KERNEL_SRC/.config"
 
-          # The upstream standalone Makefile defaults CONFIG_PLATFORM_I386_PC=y,
-          # which overrides the DDK toolchain/target. Disable that host preset
-          # and build the driver's Kbuild target directly for the prepared arm64 tree.
+          # Start from a pristine upstream driver tree for reproducible output.
+          make -C "$KERNEL_SRC" M="$PWD" clean || true
+          git clean -ffdx
+          git reset --hard HEAD
+
+          # This legacy Realtek driver expects explicit host byte-order defines
+          # when not using its old CONFIG_PLATFORM_I386_PC platform preset.
+          # Keep the DDK's Android ARM64 Kbuild/toolchain and specify USB RTL8188E.
           make -C "$KERNEL_SRC" \
             M="$PWD" \
             ARCH=arm64 \
@@ -53,7 +58,7 @@ jobs:
             CONFIG_RTL8188E=y \
             CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_I386_PC=n \
-            KBUILD_EXTMOD="$PWD" \
+            KCFLAGS="-DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE" \
             modules V=1
 
           test -s 8188eu.ko
