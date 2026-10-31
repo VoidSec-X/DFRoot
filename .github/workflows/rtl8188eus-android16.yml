@@ -1,0 +1,78 @@
+name: Build Aircrack-ng RTL8188EUS Module (Android 16)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/rtl8188eus-android16.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/rtl8188eus-android16.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-rtl8188eus:
+    name: RTL8188EUS / android16-6.12
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:android16-6.12-20260828
+      options: --privileged
+    steps:
+      - name: Checkout DFRoot
+        uses: actions/checkout@v7
+
+      - name: Clone Aircrack-ng RTL8188EUS
+        run: |
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
+
+      - name: Verify DDK environment
+        run: |
+          set -euxo pipefail
+          test -n "$KDIR"
+          test -f "$KDIR/Makefile"
+          test -f "$KDIR/.config"
+          test "$ARCH" = "arm64"
+          test "$LLVM" = "1"
+          printf 'KDIR=%s\nARCH=%s\nCROSS_COMPILE=%s\nLLVM=%s\n' "$KDIR" "$ARCH" "$CROSS_COMPILE" "$LLVM"
+          grep -E '^(CONFIG_MODULES|CONFIG_MODVERSIONS|CONFIG_ARM64)=' "$KDIR/.config" || true
+
+      - name: Build 8188eu.ko with the DFRoot DDK recipe
+        working-directory: rtl8188eu
+        shell: bash
+        run: |
+          set -euxo pipefail
+          : "${KDIR:?DDK image did not set KDIR}"
+          : "${CROSS_COMPILE:?DDK image did not set CROSS_COMPILE}"
+          test -f "$KDIR/Makefile"
+          test -f "$KDIR/.config"
+
+          make -C "$KDIR" M="$PWD" clean
+          find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
+
+          make -C "$KDIR" M="$PWD" \
+            ARCH=arm64 \
+            LLVM=1 \
+            modules
+
+          test -s 8188eu.ko
+          llvm-objcopy --strip-unneeded \
+            -R .comment -R .note.gnu.property \
+            -R .note.Linux -R .note.GNU-stack \
+            -R .BTF -R .BTF.base -R .llvm_addrsig \
+            -R .hyp.text -R .hyp.bss -R .hyp.rodata -R .hyp.event_ids \
+            -R .hyp.patchable_function_entries -R .hyp.data \
+            8188eu.ko
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android16-6.12.ko"
+          file "$GITHUB_WORKSPACE/out/8188eu-android16-6.12.ko"
+          modinfo "$GITHUB_WORKSPACE/out/8188eu-android16-6.12.ko"
+
+      - name: Upload RTL8188EUS module
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtl8188eus-android16-6.12
+          path: out/8188eu-android16-6.12.ko
+          if-no-files-found: error
