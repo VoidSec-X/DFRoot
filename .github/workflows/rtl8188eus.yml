@@ -44,17 +44,18 @@ jobs:
                   raise SystemExit(f"{path}: expected one exact match, found {count}")
               file.write_text(source.replace(old, new, 1))
 
-          # Convert only the actual information-element payload member.
+          # Convert zero-length tail only in the Linux ieee80211_info_element.
           ieee = Path("include/ieee80211.h")
           source = ieee.read_text()
-          pattern = re.compile(
-              r"(struct\s+ieee80211_info_element\s*\{[^}]*?\bu8\s+data)\[0\](\s*;\s*\})",
-              re.S,
-          )
-          source, count = pattern.subn(r"\1[]\2", source, count=1)
-          if count != 1:
-              raise SystemExit("struct ieee80211_info_element data[0] declaration not found exactly once")
-          ieee.write_text(source)
+          old = """struct ieee80211_info_element {
+          \tu8 id;
+          \tu8 len;
+          \tu8 data[0];
+          } __attribute__((packed));"""
+          new = old.replace("u8 data[0];", "u8 data[];")
+          if source.count(old) != 1:
+              raise SystemExit("Linux ieee80211_info_element definition not found exactly once")
+          ieee.write_text(source.replace(old, new, 1))
 
           replace_once(
               "include/wlan_bssdef.h",
@@ -62,46 +63,46 @@ jobs:
               "\tUCHAR  data[];",
           )
 
-          # Guard channel-switch payload reads by their declared IE lengths.
-          replace_once(
-              "core/rtw_mlme_ext.c",
-              """\t\t\tif (ie->id == WLAN_EID_CHANNEL_SWITCH) {
-          \t\t\t\tch_switch_mode = ie->data[0];""",
-              """\t\t\tif (ie->id == WLAN_EID_CHANNEL_SWITCH) {
-          \t\t\t\tif (ie->len < 3)
-          \t\t\t\t\tcontinue;
-          \t\t\t\tch_switch_mode = ie->data[0];""",
+          # Bound the channel-switch IE payload before reading its fields.
+          mlme = Path("core/rtw_mlme_ext.c")
+          source = mlme.read_text()
+          source, count = re.subn(
+              r"(if \(ie->id == WLAN_EID_CHANNEL_SWITCH\) \{\n)(\s*)(ch_switch_mode = ie->data\[0\];)",
+              r"\1\2if (ie->len < 3)\n\2\tcontinue;\n\2\3",
+              source,
+              count=1,
           )
-          replace_once(
-              "core/rtw_mlme_ext.c",
-              """\t\t\t} else if (ie->id == WLAN_EID_SECONDARY_CHANNEL_OFFSET) {
-          \t\t\t\tch_offset = secondary_ch_offset_to_hal_ch_offset(ie->data[0]);""",
-              """\t\t\t} else if (ie->id == WLAN_EID_SECONDARY_CHANNEL_OFFSET) {
-          \t\t\t\tif (ie->len < 1)
-          \t\t\t\t\tcontinue;
-          \t\t\t\tch_offset = secondary_ch_offset_to_hal_ch_offset(ie->data[0]);""",
+          if count != 1:
+              raise SystemExit("Channel-switch IE length guard insertion failed")
+          source, count = re.subn(
+              r"(else if \(ie->id == WLAN_EID_SECONDARY_CHANNEL_OFFSET\) \{\n)(\s*)(ch_offset = secondary_ch_offset_to_hal_ch_offset\(ie->data\[0\]\);)",
+              r"\1\2if (ie->len < 1)\n\2\tcontinue;\n\2\3",
+              source,
+              count=1,
           )
+          if count != 1:
+              raise SystemExit("Secondary-channel IE length guard insertion failed")
+          mlme.write_text(source)
 
-          # Preserve switch semantics: stop each RSN branch before default.
+          # Terminate both RSN switch branches before default; match semantic lines.
           util = Path("core/rtw_wlan_util.c")
           source = util.read_text()
           source, first = re.subn(
-              r"(case _RSN_IE_2_:\n[ \t]*if \(_rtw_memcmp\(\(pIE->data \+ 8\), RSN_TKIP_CIPHER, 4\)\)\n[ \t]*return _TRUE;)\n\n([ \t]*default:)",
-              r"\1\n\t\t\t\tbreak;\n\n\2",
+              r"(case _RSN_IE_2_:\n\s*if \(_rtw_memcmp\(\(pIE->data \+ 8\), RSN_TKIP_CIPHER, 4\)\)\n\s*return _TRUE;)\n\s*(default:)",
+              lambda m: m.group(1) + "\n\t\t\t\tbreak;\n\n\t\t\t" + m.group(2),
               source,
               count=1,
           )
           if first != 1:
-              raise SystemExit("TKIP RSN switch case patch did not match exactly once")
-
+              raise SystemExit("TKIP RSN switch branch fix failed")
           source, second = re.subn(
-              r"(case _RSN_IE_2_:\n[ \t]*if \(\(_rtw_memcmp\(\(pIE->data \+ 8\), RSN_CIPHER_SUITE_CCMP, 4\)\)\s+\|\|\n[ \t]*\(_rtw_memcmp\(\(pIE->data \+ 12\), RSN_CIPHER_SUITE_CCMP, 4\)\)\)\n[ \t]*return _FALSE;)\n\n([ \t]*default:)",
-              r"\1\n\t\t\t\tbreak;\n\n\2",
+              r"(case _RSN_IE_2_:\n\s*if \(\(_rtw_memcmp\(\(pIE->data \+ 8\), RSN_CIPHER_SUITE_CCMP, 4\)\)\s*\|\|\s*\(_rtw_memcmp\(\(pIE->data \+ 12\), RSN_CIPHER_SUITE_CCMP, 4\)\)\)\n\s*return _FALSE;)\n\s*(default:)",
+              lambda m: m.group(1) + "\n\t\t\t\tbreak;\n\n\t\t\t" + m.group(2),
               source,
               count=1,
           )
           if second != 1:
-              raise SystemExit("CCMP RSN switch case patch did not match exactly once")
+              raise SystemExit("CCMP RSN switch branch fix failed")
           util.write_text(source)
           PY
 
