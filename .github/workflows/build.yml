@@ -333,56 +333,47 @@ jobs:
               source = source.replace(old, new, 1)
           p.write_text(source)
 
-          # Match the Android 6.6 ndo_start_xmit callback type exactly.
-          # Keep the driver's legacy _pkt/_nic_hdl API in its internal helper;
-          # expose a thin Linux-typed wrapper at the net_device_ops boundary.
+          # Preserve legacy driver internals behind one precisely typed ndo_start_xmit wrapper.
           p = Path("include/xmit_osdep.h")
           source = p.read_text()
-          old = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          if old in source:
-              source = source.replace(old,
-                  "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);", 1)
-          elif "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);" not in source:
-              raise SystemExit("xmit_osdep.h: Linux rtw_xmit_entry declaration not found")
+          decl = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
+          old_decl = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          if old_decl in source:
+              source = source.replace(old_decl, decl, 1)
+          elif decl not in source:
+              raise SystemExit("xmit_osdep.h: rtw_xmit_entry declaration missing")
           p.write_text(source)
 
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
-          # Revert the previous broad signature rewrite if present, and give the
-          # exported netdev callback a dedicated wrapper with the kernel typedef.
-          source = source.replace(
-              "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)",
-              "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)", 1
-          ) if "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)" in source else source
-          source = source.replace(
-              "netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)",
-              "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)", 1
-          )
-          old_wrapper = """int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)
-          {
-          \t_adapter *padapter = (_adapter *)rtw_netdev_priv(pnetdev);"""
-          new_wrapper = """static int rtw_xmit_entry_legacy(_pkt *pkt, _nic_hdl pnetdev)
-          {
-          \t_adapter *padapter = (_adapter *)rtw_netdev_priv(pnetdev);"""
-          if source.count(old_wrapper) != 1:
-              raise SystemExit("xmit_linux.c: legacy wrapper body not found exactly once")
-          source = source.replace(old_wrapper, new_wrapper, 1)
-          source += """
-
+          old_sig = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          broad_sig = "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)"
+          if broad_sig in source:
+              source = source.replace(broad_sig, old_sig, 1)
+          if source.count(old_sig) != 1:
+              raise SystemExit("xmit_linux.c: expected exactly one legacy rtw_xmit_entry body")
+          source = source.replace(old_sig,
+              "static int rtw_xmit_entry_legacy(_pkt *pkt, _nic_hdl pnetdev)", 1)
+          wrapper = r"""
           /*
-           * net_device_ops::ndo_start_xmit is a KCFI-checked indirect call.
-           * Its exact Android 6.6 prototype is netdev_tx_t(struct sk_buff *,
-           * struct net_device *). Do not cast the legacy driver entry point.
+           * Exact net_device_ops::ndo_start_xmit ABI boundary.
+           * Do not cast the callback itself; the legacy helper stays private.
            */
           netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)
           {
-          \treturn (netdev_tx_t)rtw_xmit_entry_legacy((_pkt *)skb, (_nic_hdl)dev);
+              return (netdev_tx_t)rtw_xmit_entry_legacy((_pkt *)skb, (_nic_hdl)dev);
           }
+
+          _Static_assert(__same_type(&rtw_xmit_entry,
+              ((struct net_device_ops *)0)->ndo_start_xmit),
+              "rtw_xmit_entry must exactly match ndo_start_xmit ABI");
           """
+          if "netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)" in source:
+              raise SystemExit("xmit_linux.c: duplicate ndo_start_xmit wrapper")
+          source = source.rstrip() + "\n" + wrapper + "\n"
           p.write_text(source)
 
-          # The other ndo_start_xmit implementations are indirect-call targets too.
-          # Their return type must match netdev_tx_t, not merely be integer-compatible.
+          # Every ndo_start_xmit implementation must use netdev_tx_t.
           for path, old_sig, new_sig in (
               ("os_dep/linux/ioctl_cfg80211.c",
                "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)",
@@ -396,20 +387,8 @@ jobs:
               if source.count(old_sig) == 1:
                   source = source.replace(old_sig, new_sig, 1)
               elif source.count(new_sig) != 1:
-                  raise SystemExit(f"{path}: expected exactly one ndo_start_xmit callback signature")
+                  raise SystemExit(f"{path}: expected exactly one xmit callback")
               p.write_text(source)
-
-          # Compile-time ABI guard: fail the build if the exported callback's
-          # canonical function-pointer type differs from net_device_ops.
-          p = Path("os_dep/linux/xmit_linux.c")
-          source = p.read_text()
-          anchor = "netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)\n{\n\treturn (netdev_tx_t)rtw_xmit_entry_legacy((_pkt *)skb, (_nic_hdl)dev);\n}"
-          assertion = anchor + "\n\n_Static_assert(__same_type(&rtw_xmit_entry, ((struct net_device_ops *)0)->ndo_start_xmit),\n               \"rtw_xmit_entry must exactly match ndo_start_xmit ABI\");"
-          if source.count(anchor) == 1 and "_Static_assert(__same_type(&rtw_xmit_entry" not in source:
-              source = source.replace(anchor, assertion, 1)
-          elif "_Static_assert(__same_type(&rtw_xmit_entry" not in source:
-              raise SystemExit("xmit_linux.c: cannot place ndo_start_xmit ABI static assertion")
-          p.write_text(source)
 
           PY
 
