@@ -162,8 +162,8 @@ jobs:
           source = source.replace(old, new, 1)
           old = "\twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"
           new = """\tRTW_INFO("DFROOT: cfg80211 P2P callbacks start=%p stop=%p\\n",
-          \t\t rtw_cfg80211_ops.start_p2p_device,
-          \t\t rtw_cfg80211_ops.stop_p2p_device);
+          \t\t (void *)rtw_cfg80211_ops.start_p2p_device,
+          \t\t (void *)rtw_cfg80211_ops.stop_p2p_device);
           \twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"""
           if source.count(old) != 1:
               raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_new call")
