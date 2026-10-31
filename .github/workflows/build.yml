@@ -185,13 +185,39 @@ jobs:
           else:
               print("rtw_wiphy_alloc: set_wiphy_dev already present; skipping")
 
-          # Preserve the upstream rtnl-lock decision: register_netdev() when the
-          # caller may acquire RTNL, register_netdevice() when RTNL is already held.
+          # Kernel 6.x: make the wiphy parent explicit at the point cfg80211
+          # resources are registered. rtw_cfg80211_ndev_res_register() registers
+          # the wiphy before either RTNL-aware netdev registration path below.
+          # Do not call rtw_wiphy_register() a second time here: that routine is
+          # already called by rtw_cfg80211_ndev_res_register().
           p = Path("os_dep/linux/os_intfs.c")
           source = p.read_text()
-          if "register_netdev(ndev)" not in source or "register_netdevice(ndev)" not in source:
-              raise SystemExit("os_intfs.c: expected RTNL-aware netdev registration paths not found; refusing to alter")
-          print("os_intfs.c: upstream RTNL-aware netdev registration retained")
+          anchor = """\tif (rtw_cfg80211_ndev_res_register(adapter) != _SUCCESS) {
+\t\trtw_warn_on(1);
+\t\tret = _FAIL;
+\t\tgoto exit;
+\t}"""
+          patched = """#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))
+\t/* Ensure cfg80211 has the owning USB device before wiphy registration. */
+\tif (adapter_to_wiphy(adapter))
+\t\tset_wiphy_dev(adapter_to_wiphy(adapter), dvobj_to_dev(dvobj));
+#endif
+\tif (rtw_cfg80211_ndev_res_register(adapter) != _SUCCESS) {
+\t\trtw_warn_on(1);
+\t\tret = _FAIL;
+\t\tgoto exit;
+\t}"""
+          if source.count(anchor) != 1:
+              raise SystemExit("os_intfs.c: cfg80211 resource registration block not found exactly once")
+          source = source.replace(anchor, patched, 1)
+          # Assert that wiphy registration remains before netdevice registration.
+          cfg_pos = source.index("rtw_cfg80211_ndev_res_register(adapter)")
+          netdev_pos = min(pos for token in ("register_netdev(ndev)", "register_netdevice(ndev)")
+                           if (pos := source.find(token, cfg_pos)) >= 0)
+          if cfg_pos >= netdev_pos:
+              raise SystemExit("os_intfs.c: cfg80211 registration must precede netdevice registration")
+          p.write_text(source)
+          print("os_intfs.c: explicit wiphy parent set; cfg80211-before-netdev order verified")
 
           # Linux 6.6 removed the legacy association/disassociation helpers.
           # Replace the existing compatibility macro in-place, keeping exactly
