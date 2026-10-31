@@ -1,0 +1,291 @@
+name: Build RTL8188EUS testmode-y only
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build-rtl8188eus:
+    name: RTL8188EUS / android15-6.6 / testmode-y
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build only 8188eu-android15-6.6-testmode-y.ko
+        shell: bash
+        run: |
+          set -euxo pipefail
+          KDIR="${KDIR:?DDK KDIR is not set}"
+          git clone --depth=1 --branch v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
+          cd rtl8188eu
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("include/ieee80211.h")
+          s = p.read_text()
+          a = s.index("struct ieee80211_info_element {")
+          b = s.index("} __attribute__((packed));", a)
+          block = s[a:b]
+          if "u8 data[0];" not in block:
+              raise SystemExit("ieee80211_info_element data[0] missing")
+          s = s[:a] + block.replace("u8 data[0];", "u8 data[];", 1) + s[b:]
+          p.write_text(s)
+
+          s = p.read_text()
+          a = s.index("struct ieee_param {")
+          b = s.index("} ieee_param;", a)
+          block = s[a:b]
+          if "u8 key[0];" not in block:
+              raise SystemExit("ieee_param key[0] missing")
+          p.write_text(s[:a] + block.replace("u8 key[0];", "u8 key[];", 1) + s[b:])
+
+          p = Path("include/wlan_bssdef.h")
+          s = p.read_text()
+          a = s.index("struct _NDIS_802_11_VARIABLE_IEs")
+          b = s.index("};", a)
+          block = s[a:b]
+          if "data[1]" not in block:
+              raise SystemExit("NDIS variable IE data[1] missing")
+          p.write_text(s[:a] + block.replace("data[1]", "data[]", 1) + s[b:])
+
+          p = Path("core/rtw_wlan_util.c")
+          lines = p.read_text().splitlines()
+          inserts = []
+          for n, line in enumerate(lines):
+              if line.strip() != "case _RSN_IE_2_:":
+                  continue
+              stop = next((m for m in range(n + 1, len(lines))
+                           if lines[m].strip().startswith(("case ", "default:"))), len(lines))
+              for m in range(n + 1, stop):
+                  if lines[m].strip() in ("return _TRUE;", "return _FALSE;"):
+                      if m + 1 >= len(lines) or lines[m + 1].strip() != "break;":
+                          indent = line[:len(line) - len(line.lstrip())]
+                          inserts.append((m + 1, indent + "break;"))
+                      break
+          if not inserts:
+              raise SystemExit("RSN conditional branches not found")
+          for index, statement in reversed(inserts):
+              lines.insert(index, statement)
+          p.write_text("\n".join(lines) + "\n")
+
+          p = Path("include/autoconf.h")
+          s = p.read_text()
+          if "#define CONFIG_IOCTL_CFG80211" not in s:
+              s, count = re.subn(r"^\s*/\*\s*#define CONFIG_IOCTL_CFG80211\s*\*/",
+                                 "#define CONFIG_IOCTL_CFG80211", s, count=1, flags=re.M)
+              if count != 1:
+                  raise SystemExit("cannot enable CONFIG_IOCTL_CFG80211")
+          if "#define RTW_SINGLE_WIPHY" in s:
+              raise SystemExit("unexpected RTW_SINGLE_WIPHY configuration")
+          p.write_text(s)
+
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          s = p.read_text()
+          old = """#if CONFIG_RTW_MACADDR_ACL && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+          \twiphy->max_acl_mac_addrs = NUM_ACL;
+          #endif"""
+          new = """#if defined(CONFIG_AP_MODE) && CONFIG_RTW_MACADDR_ACL && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+          \twiphy->max_acl_mac_addrs = NUM_ACL;
+          #endif"""
+          if s.count(old) != 1:
+              raise SystemExit("ACL capability block mismatch")
+          s = s.replace(old, new, 1)
+          old = "\treturn wiphy_register(wiphy);"
+          new = """\t{
+          \t\tint ret = wiphy_register(wiphy);
+          \t\tpr_err("DFROOT: wiphy_register(%p) returned %d\\n", wiphy, ret);
+          \t\treturn ret;
+          \t}"""
+          if s.count(old) != 1:
+              raise SystemExit("wiphy_register site mismatch")
+          s = s.replace(old, new, 1)
+          old = "\twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"
+          new = """\tpr_err("DFROOT: cfg80211 ops remain=%p cancel=%p p2p_start=%p p2p_stop=%p acl=%p\\n",
+          \t\t (void *)rtw_cfg80211_ops.remain_on_channel,
+          \t\t (void *)rtw_cfg80211_ops.cancel_remain_on_channel,
+          \t\t (void *)rtw_cfg80211_ops.start_p2p_device,
+          \t\t (void *)rtw_cfg80211_ops.stop_p2p_device,
+          \t\t (void *)rtw_cfg80211_ops.set_mac_acl);
+          \twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"""
+          if s.count(old) != 1:
+              raise SystemExit("wiphy_new site mismatch")
+          s = s.replace(old, new, 1)
+          marker = "struct wiphy *rtw_wiphy_alloc(_adapter *padapter, struct device *dev)\\n{"
+          a = s.find(marker)
+          if a < 0:
+              raise SystemExit("rtw_wiphy_alloc missing")
+          b = s.find("\\n}", a)
+          block = s[a:b]
+          if "set_wiphy_dev(wiphy, dev);" not in block:
+              anchor = "\twiphy = wiphy_new("
+              pos = block.find(anchor)
+              semi = block.find(";", pos)
+              if pos < 0 or semi < 0:
+                  raise SystemExit("wiphy allocation statement missing")
+              block = block[:semi+1] + "\\n#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))\\n\\tset_wiphy_dev(wiphy, dev);\\n#endif" + block[semi+1:]
+              s = s[:a] + block + s[b:]
+          p.write_text(s)
+
+          p = Path("os_dep/linux/os_intfs.c")
+          s = p.read_text()
+          old = """\tif (rtnl_lock_needed)
+          \t\tret = (register_netdev(ndev) == 0) ? _SUCCESS : _FAIL;
+          \telse
+          \t\tret = (register_netdevice(ndev) == 0) ? _SUCCESS : _FAIL;"""
+          new = """\tif (rtnl_lock_needed)
+          \t\tret = register_netdev(ndev);
+          \telse
+          \t\tret = register_netdevice(ndev);
+          \tif (ret) {
+          \t\tpr_err("DFROOT: netdev registration failed name=%s errno=%d\\n", ndev->name, ret);
+          \t\tret = _FAIL;
+          \t} else {
+          \t\tpr_err("DFROOT: netdev registered name=%s\\n", ndev->name);
+          \t\tret = _SUCCESS;
+          \t}"""
+          if s.count(old) != 1:
+              raise SystemExit("netdev registration block mismatch")
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path("os_dep/osdep_service.c")
+          s = p.read_text()
+          ns = "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);"
+          if ns not in s:
+              s = s.rstrip() + "\\n\\n" + ns + "\\n"
+          p.write_text(s)
+
+          p = Path("os_dep/linux/ioctl_cfg80211.h")
+          s = p.read_text()
+          old = """#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0))  && !defined(COMPAT_KERNEL_RELEASE)
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, buf, len)
+          #else
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
+          #endif"""
+          new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+          #define rtw_cfg80211_send_rx_assoc(adapter, arg_bss, arg_buf, arg_len) \\
+          do { \\
+              struct cfg80211_rx_assoc_resp assoc_resp = { \\
+                  .buf = (arg_buf), .len = (arg_len), .req_ies = NULL, .req_ies_len = 0, \\
+              }; \\
+              assoc_resp.links[0].bss = (arg_bss); \\
+              cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
+          } while (0)
+          #elif (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0)) && !defined(COMPAT_KERNEL_RELEASE)
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, buf, len)
+          #else
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
+          #endif"""
+          if s.count(old) != 1:
+              raise SystemExit("association compatibility macro mismatch")
+          s = s.replace(old, new, 1)
+          old = "cfg80211_send_disassoc(padapter->pnetdev, mgmt_buf, frame_len);"
+          new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+          \tcfg80211_tx_mlme_mgmt(padapter->pnetdev, mgmt_buf, frame_len, false);
+          #else
+          \tcfg80211_send_disassoc(padapter->pnetdev, mgmt_buf, frame_len);
+          #endif"""
+          if s.count(old) != 1:
+              raise SystemExit("disassoc helper site mismatch")
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path("hal/phydm/phydm_api.c")
+          s = p.read_text()
+          if s.count("if (power_offset > -8 || power_offset < 7)") != 1:
+              raise SystemExit("TXAGC offset check mismatch")
+          p.write_text(s.replace("if (power_offset > -8 || power_offset < 7)",
+                                 "if (power_offset > -8 && power_offset < 7)", 1))
+
+          p = Path("hal/phydm/phydm_debug.c")
+          s = p.read_text()
+          if s.count("if (rx_ht != 2 || rx_ht != 1)") != 1:
+              raise SystemExit("rx_ht condition mismatch")
+          p.write_text(s.replace("if (rx_ht != 2 || rx_ht != 1)",
+                                 "if (rx_ht != 2 && rx_ht != 1)", 1))
+
+          p = Path("hal/rtl8188e/usb/usb_halinit.c")
+          s = p.read_text()
+          if s.count("if ((IS_FULL_SPEED_USB(Adapter))") != 1:
+              raise SystemExit("USB speed condition mismatch")
+          p.write_text(s.replace("if ((IS_FULL_SPEED_USB(Adapter))",
+                                 "if (IS_FULL_SPEED_USB(Adapter)", 1))
+
+          p = Path("core/rtw_odm.c")
+          s = p.read_text()
+          for call in ("_enter_critical_bh(&pHalData->IQKSpinLock, &irqL);",
+                       "_exit_critical_bh(&pHalData->IQKSpinLock, &irqL);"):
+              old = call + "\\n\\tdefault:"
+              if s.count(old) != 1:
+                  raise SystemExit("ODm switch fallthrough site mismatch")
+              s = s.replace(old, call + "\\n\\t\\tbreak;\\n\\tdefault:", 1)
+          p.write_text(s)
+
+          p = Path("include/xmit_osdep.h")
+          s = p.read_text()
+          old = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          new = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif new not in s:
+              raise SystemExit("xmit prototype mismatch")
+          p.write_text(s)
+
+          p = Path("os_dep/linux/xmit_linux.c")
+          s = p.read_text()
+          old = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          new = "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)"
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif s.count(new) != 1:
+              raise SystemExit("xmit definition mismatch")
+          p.write_text(s)
+
+          for path, sig in (
+              ("os_dep/linux/ioctl_cfg80211.c", "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
+              ("os_dep/linux/mlme_linux.c", "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
+          ):
+              p = Path(path)
+              s = p.read_text()
+              fixed = sig.replace("static int ", "static netdev_tx_t ", 1)
+              if sig in s:
+                  s = s.replace(sig, fixed, 1)
+              elif fixed not in s:
+                  raise SystemExit(f"{path}: xmit callback not found")
+              p.write_text(s)
+          PY
+
+          mkdir -p "$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net"
+          ANDROID_CFG="$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net/cfg80211.h"
+          curl -fsSL "https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/include/net/cfg80211.h?format=TEXT" | base64 -d > "$ANDROID_CFG"
+          test -s "$ANDROID_CFG"
+          grep -q 'struct cfg80211_ops' "$ANDROID_CFG"
+          mkdir -p "$KDIR/include/net"
+          install -m 0644 "$ANDROID_CFG" "$KDIR/include/net/cfg80211.h"
+
+          # Build exactly one testmode-y artifact. The macro controls the
+          # cfg80211_ops member layout in the separately compiled driver.
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+
+          test -s 8188eu.ko
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          llvm-readelf -h "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          llvm-nm -u "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko" > "$GITHUB_WORKSPACE/out/undefined-symbols.txt" || true
+          sha256sum "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko" | tee "$GITHUB_WORKSPACE/out/SHA256SUMS"
+
+      - name: Upload only requested driver
+        uses: actions/upload-artifact@v7
+        with:
+          name: 8188eu-android15-6.6-testmode-y
+          path: out/8188eu-android15-6.6-testmode-y.ko
+          if-no-files-found: error
+          compression-level: 0
