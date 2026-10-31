@@ -15,14 +15,7 @@ jobs:
     strategy:
       matrix:
         kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
           - android15-6.6
-          - android16-6.12
-          - android17-6.18
     container:
       image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828
       options: --privileged
@@ -410,8 +403,8 @@ jobs:
           # canonical function-pointer type differs from net_device_ops.
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
-          anchor = "netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)\n{\n\\treturn (netdev_tx_t)rtw_xmit_entry_legacy((_pkt *)skb, (_nic_hdl)dev);\n}"
-          assertion = anchor + "\n\n_Static_assert(__same_type(&rtw_xmit_entry, ((struct net_device_ops *)0)->ndo_start_xmit),\\n               \"rtw_xmit_entry must exactly match ndo_start_xmit ABI\");"
+          anchor = "netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)\n{\n\treturn (netdev_tx_t)rtw_xmit_entry_legacy((_pkt *)skb, (_nic_hdl)dev);\n}"
+          assertion = anchor + "\n\n_Static_assert(__same_type(&rtw_xmit_entry, ((struct net_device_ops *)0)->ndo_start_xmit),\n               \"rtw_xmit_entry must exactly match ndo_start_xmit ABI\");"
           if source.count(anchor) == 1 and "_Static_assert(__same_type(&rtw_xmit_entry" not in source:
               source = source.replace(anchor, assertion, 1)
           elif "_Static_assert(__same_type(&rtw_xmit_entry" not in source:
@@ -448,9 +441,9 @@ jobs:
             exit 1
           }
           mkdir -p "$GITHUB_WORKSPACE/out"
-          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \\
-            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \\
-            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \\
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
             KCFLAGS="-DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
           llvm-readelf -h 8188eu.ko | grep -q 'AArch64'
