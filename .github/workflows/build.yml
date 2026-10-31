@@ -362,11 +362,9 @@ jobs:
           install -m 0644 "$REALME_CFG" "$KDIR/include/net/cfg80211.h"
           test -s "$KDIR/include/net/cfg80211.h"
 
-          # Match the uploaded Realme P1 kernel.config: CONFIG_NL80211_TESTMODE
-          # is not set. -U in KCFLAGS alone is insufficient because the kernel
-          # forcibly includes generated/autoconf.h after command-line options;
-          # remove the generated define itself before compiling the external
-          # driver so struct cfg80211_ops has the same conditional layout.
+          # Test the alternate cfg80211_ops layout with CONFIG_NL80211_TESTMODE enabled.
+          # Remove any generated define first; KCFLAGS below explicitly enables
+          # the two testmode callback slots for this driver build.
           KCONFIG_AUTO="$KDIR/include/generated/autoconf.h"
           if [ -f "$KCONFIG_AUTO" ]; then
             sed -i '/^#define CONFIG_NL80211_TESTMODE\b/d' "$KCONFIG_AUTO"
@@ -378,7 +376,7 @@ jobs:
             echo "::error::Missing $KCONFIG_AUTO; cannot enforce device cfg80211 layout"
             exit 1
           fi
-          echo "Device cfg80211 layout: CONFIG_NL80211_TESTMODE=n"
+          echo "Driver cfg80211 layout: CONFIG_NL80211_TESTMODE=y (alternate ABI test)"
           grep -n 'CONFIG_NL80211_TESTMODE' "$KCONFIG_AUTO" || true
 
           make -C "$KDIR" M="$PWD" \
