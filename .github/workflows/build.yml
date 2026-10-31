@@ -148,6 +148,84 @@ jobs:
           # Keep CONFIG_P2P enabled. The station driver retains its upstream
           # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
 
+          # Harden the cfg80211 scan callback for wildcard/empty-SSID scans.
+          # cfg80211 may issue a scan with n_ssids == 0; never dereference
+          # request->ssids[0] in that case. Validate the request arrays before
+          # the legacy Realtek scan path copies their contents.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = "\twdev = request->wdev;"
+          new = """\twdev = request->wdev;
+          \tif (!wdev) {
+          \t\tret = -EINVAL;
+          \t\tgoto exit;
+          \t}"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: expected one scan request wdev assignment")
+          source = source.replace(old, new, 1)
+
+          old = """\tpwdev_priv = adapter_wdev_data(padapter);
+          \tpmlmepriv = &padapter->mlmepriv;"""
+          new = """\tif ((request->n_ssids && !request->ssids) ||
+          \t    (request->n_channels && !request->channels)) {
+          \t\tret = -EINVAL;
+          \t\tgoto exit;
+          \t}
+          \tpwdev_priv = adapter_wdev_data(padapter);
+          \tpmlmepriv = &padapter->mlmepriv;"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: scan request array validation anchor not found")
+          source = source.replace(old, new, 1)
+
+          old = """\t\tif (ssids->ssid != NULL
+          \t\t\t&& _rtw_memcmp(ssids->ssid, "DIRECT-", 7)"""
+          new = """\t\tif (request->n_ssids > 0 && ssids != NULL &&
+          \t\t    ssids[0].ssid != NULL && ssids[0].ssid_len >= 7
+          \t\t\t&& _rtw_memcmp(ssids[0].ssid, "DIRECT-", 7)"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: wildcard SSID/P2P dereference not found exactly once")
+          source = source.replace(old, new, 1)
+
+          old = """\t\t_rtw_memcpy(&parm.ssid[i].Ssid, ssids[i].ssid, ssids[i].ssid_len);
+          \t\tparm.ssid[i].SsidLength = ssids[i].ssid_len;"""
+          new = """\t\tif (!ssids[i].ssid || ssids[i].ssid_len > sizeof(parm.ssid[i].Ssid)) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
+          \t\t_rtw_memcpy(&parm.ssid[i].Ssid, ssids[i].ssid, ssids[i].ssid_len);
+          \t\tparm.ssid[i].SsidLength = ssids[i].ssid_len;"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: SSID copy site not found exactly once")
+          source = source.replace(old, new, 1)
+
+          old = """\t\tparm.ch[i].hw_value = request->channels[i]->hw_value;"""
+          new = """\t\tif (!request->channels[i]) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
+          \t\tparm.ch[i].hw_value = request->channels[i]->hw_value;"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: channel copy site not found exactly once")
+          source = source.replace(old, new, 1)
+
+          # Add a compact breadcrumb so a future scan-path failure can be
+          # correlated with the exact cfg80211 request before dereferencing it.
+          marker = "static int cfg80211_rtw_scan(struct wiphy *wiphy"
+          start = source.find(marker)
+          body = source.find("\n{", start)
+          if start < 0 or body < 0:
+              raise SystemExit("ioctl_cfg80211.c: cfg80211_rtw_scan body not found")
+          brace = body + 2
+          breadcrumb = """
+          \tif (!request)
+          \t\treturn -EINVAL;
+          \tpr_err("DFROOT: scan entry request=%p wdev=%p ssids=%p n_ssids=%u channels=%p n_channels=%u\\n",
+          \t\trequest, request->wdev, request->ssids, request->n_ssids,
+          \t\trequest->channels, request->n_channels);
+          """
+          source = source[:brace] + breadcrumb + source[brace:]
+          p.write_text(source)
+
           # The RTL8188EUS ops table places set_mac_acl inside CONFIG_AP_MODE,
           # but preinit used to advertise max_acl_mac_addrs whenever ACL was enabled.
           # cfg80211 rejects wiphy_register() when the limit is nonzero and the
