@@ -34,6 +34,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           def replace_once(path: str, old: str, new: str) -> None:
               file = Path(path)
@@ -43,19 +44,25 @@ jobs:
                   raise SystemExit(f"{path}: expected one exact match, found {count}")
               file.write_text(source.replace(old, new, 1))
 
-          # C99 flexible-array members replace legacy zero/one-length tails.
-          replace_once(
-              "include/ieee80211.h",
-              "\tu8 data[0];",
-              "\tu8 data[];",
+          # Convert only the actual information-element payload member.
+          ieee = Path("include/ieee80211.h")
+          source = ieee.read_text()
+          pattern = re.compile(
+              r"(struct\s+ieee80211_info_element\s*\{[^}]*?\bu8\s+data)\[0\](\s*;\s*\})",
+              re.S,
           )
+          source, count = pattern.subn(r"\1[]\2", source, count=1)
+          if count != 1:
+              raise SystemExit("struct ieee80211_info_element data[0] declaration not found exactly once")
+          ieee.write_text(source)
+
           replace_once(
               "include/wlan_bssdef.h",
               "\tUCHAR  data[1];",
               "\tUCHAR  data[];",
           )
 
-          # Validate IE payload lengths before reading fields from the IE body.
+          # Guard channel-switch payload reads by their declared IE lengths.
           replace_once(
               "core/rtw_mlme_ext.c",
               """\t\t\tif (ie->id == WLAN_EID_CHANNEL_SWITCH) {
@@ -75,7 +82,7 @@ jobs:
           \t\t\t\tch_offset = secondary_ch_offset_to_hal_ch_offset(ie->data[0]);""",
           )
 
-          # These cases return on a match; otherwise they must not fall into default.
+          # Preserve switch semantics: no fall-through when an RSN case does not match.
           util = Path("core/rtw_wlan_util.c")
           source = util.read_text()
           old_cases = [
