@@ -379,25 +379,25 @@ jobs:
           echo "Driver cfg80211 layout: CONFIG_NL80211_TESTMODE=y (alternate ABI test)"
           grep -n 'CONFIG_NL80211_TESTMODE' "$KCONFIG_AUTO" || true
 
-          make -C "$KDIR" M="$PWD" \
-            ARCH=arm64 \
-            LLVM=1 \
-            CONFIG_RTL8188EU=m \
-            CONFIG_RTL8188E=y \
-            CONFIG_USB_HCI=y \
-            CONFIG_PLATFORM_ANDROID_ARM64=y \
-            CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" \
-          modules
-
-          test -s 8188eu.ko
-          llvm-objcopy --strip-unneeded \
-            -R .comment -R .note.gnu-build-id -R .note.gnu.property \
-            -R .note.Linux -R .note.GNU-stack \
-            -R .BTF -R .BTF.base -R .llvm_addrsig \
-            -R .hyp.text -R .hyp.bss -R .hyp.rodata -R .hyp.event_ids \
-            -R .hyp.patchable_function_entries -R .hyp.data 8188eu.ko
           mkdir -p "$GITHUB_WORKSPACE/out"
+
+          # Build both possible cfg80211_ops layouts. The supplied config has
+          # CFG80211 unset although the device loads a vendor cfg80211 module,
+          # so it cannot identify that module\\x27s TESTMODE layout.
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-UCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+          test -s 8188eu.ko
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-n.ko"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG802 CFG80211" modules
+          test -s 8188eu.ko
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
 
@@ -406,7 +406,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: rtl8188eus-${{ matrix.kmi }}
-          path: out/8188eu-${{ matrix.kmi }}.ko
+          path: out/8188eu-${{ matrix.kmi }}*.ko
           if-no-files-found: error
 
   build-dfroot:
