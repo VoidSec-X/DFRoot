@@ -436,7 +436,7 @@ jobs:
           p = Path("hal/hal_hci/hal_usb.c")
           source = p.read_text()
           old = """tasklet_init(&precvpriv->recv_tasklet,
-          	     (void(*)(unsigned long))usb_recv_tasklet,
+          	     usb_recv_tasklet,
           	     (unsigned long)padapter);"""
           new = """tasklet_init(&precvpriv->recv_tasklet,
           	     usb_recv_tasklet,
