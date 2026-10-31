@@ -82,6 +82,19 @@ jobs:
           source = source[:start] + block.replace("u8 data[0];", "u8 data[];", 1) + source[end:]
           p.write_text(source)
 
+          # Convert the zero-length crypt.key tail to a C flexible array.
+          # This preserves the ioctl wire layout while avoiding Clang 6.6
+          # treating key[16]/key[24] offsets as out-of-bounds.
+          p = Path("include/ieee80211.h")
+          source = p.read_text()
+          start = source.index("struct ieee_param {")
+          end = source.index("} ieee_param;", start)
+          block = source[start:end]
+          if "u8 key[0];" not in block:
+              raise SystemExit("ieee_param crypt.key: key[0] declaration not found")
+          source = source[:start] + block.replace("u8 key[0];", "u8 key[];", 1) + source[end:]
+          p.write_text(source)
+
           p = Path("include/wlan_bssdef.h")
           source = p.read_text()
           marker = "struct _NDIS_802_11_VARIABLE_IEs"
