@@ -277,34 +277,26 @@ jobs:
 
           PY
 
-          # Override only cfg80211's public ops declaration with the Realme
-          # AndroidB source header. This header is from kernel 6.6.89, whereas
-          # this handset reports 6.6.118; keep the provenance explicit and
-          # compare it against the DDK copy before using it.
+          # Use only the Realme cfg80211 public header. Fetch the one file
+          # from the P1/12+ AndroidB source repository; do not build or import
+          # the vendor kernel tree.
+          mkdir -p "$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/realme-kernel-opensource/realme_12plus-5G_Narzo70_Narzo70pro_P1-5G-AndroidB-kernel-source/master/include/net/cfg80211.h" \
+            -o "$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net/cfg80211.h"
           REALME_CFG="$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net/cfg80211.h"
           test -s "$REALME_CFG"
+          grep -q 'struct cfg80211_ops' "$REALME_CFG"
           test -s "$KDIR/include/net/cfg80211.h"
           cp "$KDIR/include/net/cfg80211.h" "$RUNNER_TEMP/cfg80211.h.ddk"
           echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
-          echo "Realme source cfg80211.h sha256:"
+          echo "Realme cfg80211.h sha256:"
           sha256sum "$REALME_CFG"
           echo "DDK cfg80211.h sha256:"
           sha256sum "$RUNNER_TEMP/cfg80211.h.ddk"
-          cp "$REALME_CFG" "$KDIR/include/net/cfg80211.h"
-
-          # Use ONLY Realme's public cfg80211 header. No Realme kernel source
-          # tree is cloned/built. Restore the DDK header after the module build,
-          # so the shared kernel build tree is not left modified for other LKMs.
-          REALME_KERNEL_COMMIT="e41cd70050525492495565b955451ab6f2d6fb78"
-          REALME_CFG_URL="https://raw.githubusercontent.com/realme-kernel-opensource/realme_12plus-5G_Narzo70_Narzo70pro_P1-5G-AndroidB-kernel-source/${REALME_KERNEL_COMMIT}/include/net/cfg80211.h"
-          test -s "$KDIR/include/net/cfg80211.h"
-          test -s "$KDIR/include/linux/android_kabi.h"
-          curl --fail --location --retry 3 "$REALME_CFG_URL" -o "$RUNNER_TEMP/cfg80211.h.realme"
-          grep -q 'struct cfg80211_ops' "$RUNNER_TEMP/cfg80211.h.realme"
-          cp "$KDIR/include/net/cfg80211.h" "$RUNNER_TEMP/cfg80211.h.ddk"
-          trap 'cp "$RUNNER_TEMP/cfg80211.h.ddk" "$KDIR/include/net/cfg80211.h"' EXIT
-          cp "$RUNNER_TEMP/cfg80211.h.realme" "$KDIR/include/net/cfg80211.h"
-          echo "Using Realme cfg80211.h only (commit ${REALME_KERNEL_COMMIT}); not importing full kernel source."
+          # Deliberately replace only the public cfg80211 header for the
+          # external module compile, as requested; no other kernel files.
+          install -m 0644 "$REALME_CFG" "$KDIR/include/net/cfg80211.h"
 
           make -C "$KDIR" M="$PWD" \
             ARCH=arm64 \
