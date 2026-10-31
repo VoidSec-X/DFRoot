@@ -116,20 +116,22 @@ jobs:
               lines.insert(index, statement)
           p.write_text("\n".join(lines) + "\n")
 
-          # wiphy is a member only when cfg80211 support is enabled.
-          # Keep the upstream adapter_to_wiphy()/wiphy_net() interface intact.
-          # Enable the driver's cfg80211 build option for this Android 15 module.
+          # Keep the upstream wiphy interface; this build's driver config
+          # defines cfg80211, but does not select RTW_SINGLE_WIPHY. The
+          # adapter member is present under CONFIG_IOCTL_CFG80211 alone in
+          # non-single-wiphy mode. Select this mode explicitly to match
+          # adapter_to_wiphy(adapter) == adapter->wiphy.
           p = Path("include/autoconf.h")
           source = p.read_text()
           if "#define CONFIG_IOCTL_CFG80211" not in source:
-              # This upstream header has a commented option; enable that exact
-              # definition rather than substituting a different net namespace.
               import re
               source, count = re.subn(r"^\s*/\*\s*#define CONFIG_IOCTL_CFG80211\s*\*/",
                                      "#define CONFIG_IOCTL_CFG80211", source, count=1, flags=re.M)
               if count != 1:
                   raise SystemExit("autoconf.h: cannot enable CONFIG_IOCTL_CFG80211")
-              p.write_text(source)
+          if "#define RTW_SINGLE_WIPHY" in source:
+              raise SystemExit("RTW_SINGLE_WIPHY unexpectedly enabled; refusing to change wiphy mode")
+          p.write_text(source)
 
           # Clang 6.6 treats the intentional-looking spinlock switch fallthrough
           # as an error. These cases have no shared cleanup; terminate explicitly.
