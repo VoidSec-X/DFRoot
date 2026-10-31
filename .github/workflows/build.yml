@@ -287,16 +287,15 @@ jobs:
           REALME_CFG="$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net/cfg80211.h"
           test -s "$REALME_CFG"
           grep -q 'struct cfg80211_ops' "$REALME_CFG"
-          test -s "$KDIR/include/net/cfg80211.h"
-          cp "$KDIR/include/net/cfg80211.h" "$RUNNER_TEMP/cfg80211.h.ddk"
+          # This minimal DDK image does not ship cfg80211.h in include/net.
+          # Overlay only the Realme cfg80211 public header; do not require a
+          # pre-existing DDK copy and do not copy the rest of the vendor tree.
+          mkdir -p "$KDIR/include/net"
           echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
           echo "Realme cfg80211.h sha256:"
           sha256sum "$REALME_CFG"
-          echo "DDK cfg80211.h sha256:"
-          sha256sum "$RUNNER_TEMP/cfg80211.h.ddk"
-          # Deliberately replace only the public cfg80211 header for the
-          # external module compile, as requested; no other kernel files.
           install -m 0644 "$REALME_CFG" "$KDIR/include/net/cfg80211.h"
+          test -s "$KDIR/include/net/cfg80211.h"
 
           make -C "$KDIR" M="$PWD" \
             ARCH=arm64 \
