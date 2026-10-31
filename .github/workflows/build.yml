@@ -156,17 +156,19 @@ jobs:
               raise SystemExit("ioctl_cfg80211.h: association compatibility marker missing")
           wrapper = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
           #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) \\
-          	do { \\
-          		struct cfg80211_rx_assoc_resp assoc_resp = { \\
-          			.buf = (buf), \\
-          			.len = (len), \\
-          			.req_ies = NULL, \\
-          			.req_ies_len = 0, \\
-          			.links[0].bss = (bss), \\
-          		}; \\
-          		cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
-          	} while (0)
+          do { \\
+              struct cfg80211_rx_assoc_resp assoc_resp = { \\
+                  .buf = (buf), \\
+                  .len = (len), \\
+                  .req_ies = NULL, \\
+                  .req_ies_len = 0, \\
+                  .links[0].bss = (bss), \\
+              }; \\
+              cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
+          } while (0)
           #else
+          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
+          #endif
           """
           source = source.replace(marker, wrapper + marker, 1)
           p.write_text(source)
