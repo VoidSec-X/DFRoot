@@ -435,15 +435,25 @@ jobs:
 
           p = Path("hal/hal_hci/hal_usb.c")
           source = p.read_text()
-          old = """tasklet_init(&precvpriv->recv_tasklet,
-          	     usb_recv_tasklet,
-          	     (unsigned long)padapter);"""
-          new = """tasklet_init(&precvpriv->recv_tasklet,
-          	     usb_recv_tasklet,
-          	     (unsigned long)padapter);"""
-          if source.count(old) != 1:
-              raise SystemExit("hal_usb.c: expected one casted recv tasklet registration")
-          p.write_text(source.replace(old, new, 1))
+          # Whitespace varies between upstream formatting revisions; change
+          # only the callback cast in the unique recv_tasklet init call.
+          import re
+          pattern = re.compile(
+              r'(tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*)'
+              r'\(\s*void\s*\(\s*\*\s*\)\s*\(\s*unsigned\s+long\s*\)\s*\)'
+              r'\s*usb_recv_tasklet',
+              re.S,
+          )
+          source, count = pattern.subn(r'\1usb_recv_tasklet', source, count=1)
+          if count != 1:
+              # Already corrected in a changed upstream variant is acceptable
+              # only when the tasklet init contains the direct callback.
+              direct = re.search(
+                  r'tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*usb_recv_tasklet\s*,',
+                  source, re.S)
+              if not direct:
+                  raise SystemExit("hal_usb.c: recv_tasklet registration callback not found uniquely")
+          p.write_text(source)
 
           PY
 
