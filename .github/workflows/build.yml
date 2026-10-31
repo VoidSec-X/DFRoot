@@ -115,6 +115,23 @@ jobs:
           for index, statement in reversed(inserts):
               lines.insert(index, statement)
           p.write_text("\n".join(lines) + "\n")
+
+          # Clang 6.6 treats the intentional-looking spinlock switch fallthrough
+          # as an error. These cases have no shared cleanup; terminate explicitly.
+          p = Path("core/rtw_odm.c")
+          source = p.read_text()
+          for call in (
+              "_enter_critical_bh(&pHalData->IQKSpinLock, &irqL);",
+              "_exit_critical_bh(&pHalData->IQKSpinLock, &irqL);",
+          ):
+              old = call + "\n\tdefault:"
+              new = call + "\n\t\tbreak;\n\tdefault:"
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"rtw_odm.c: expected one {call} before default, found {count}")
+              source = source.replace(old, new, 1)
+          p.write_text(source)
+
           PY
 
           make -C "$KDIR" M="$PWD" \
