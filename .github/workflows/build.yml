@@ -166,8 +166,6 @@ jobs:
               }; \\
               cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
           } while (0)
-          #else
-          #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
           #endif
           """
           source = source.replace(marker, wrapper + marker, 1)
