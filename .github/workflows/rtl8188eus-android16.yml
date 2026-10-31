@@ -51,64 +51,55 @@ jobs:
           make -C "$KDIR" M="$PWD" clean
           find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
 
-          # Apply narrowly scoped compatibility fixes for current Clang.
+          # Fix Clang's bounds model for variable-length information elements.
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(path, old, new):
+          def patch_struct_array(path, struct_name, member, old_decl, new_decl):
               p = Path(path)
               s = p.read_text()
-              count = s.count(old)
+              pattern = rf"(struct\\s+{re.escape(struct_name)}\\s*\\{{[^}}]*?)" + re.escape(old_decl)
+              out, count = re.subn(pattern, lambda m: m.group(1) + new_decl, s, count=1, flags=re.S)
               if count != 1:
-                  raise SystemExit(f"{path}: expected one exact match, found {count}: {old!r}")
-              p.write_text(s.replace(old, new, 1))
+                  raise SystemExit(f"{path}: unable to patch {struct_name}.{member}")
+              p.write_text(out)
 
-          # The IE payload is variable-length; represent it as a C flexible array.
-          p = Path("include/ieee80211.h")
-          lines = p.read_text().splitlines()
-          starts = [i for i, line in enumerate(lines) if "struct ieee80211_info_element" in line]
-          if len(starts) != 1:
-              raise SystemExit(f"ieee80211_info_element declarations: {len(starts)}")
-          start = starts[0]
-          end = next((i for i in range(start, len(lines)) if lines[i].strip() == "};"), None)
-          if end is None:
-              raise SystemExit("ieee80211_info_element closing brace not found")
-          block = lines[start:end + 1]
-          data = [i for i, line in enumerate(block) if "data[0]" in line]
-          if len(data) != 1:
-              raise SystemExit(f"ieee80211_info_element data[0] matches: {len(data)}")
-          block[data[0]] = block[data[0]].replace("data[0]", "data[]", 1)
-          lines[start:end + 1] = block
-          p.write_text("\n".join(lines) + "\n")
-
-          # NDIS variable IE payloads are variable length, not a one-byte array.
-          replace_once("include/wlan_bssdef.h", "UCHAR  data[1];", "UCHAR  data[];")
-
-          # Make the intended switch exits explicit. These cases do not share work.
-          p = Path("core/rtw_wlan_util.c")
-          s = p.read_text()
-          s2 = s.replace(
-              "case _ERPINFO_IE_:\n\t\t\tERP_IE_handler(padapter, pIE);\n\t\t\tVCS_update(padapter, psta);\n\t\t\tbreak;",
-              "case _ERPINFO_IE_:\n\t\t\tERP_IE_handler(padapter, pIE);\n\t\t\tVCS_update(padapter, psta);\n\t\t\tbreak;",
-              1
+          patch_struct_array(
+              "include/ieee80211.h",
+              "ieee80211_info_element",
+              "data",
+              "u8 data[0];",
+              "u8 data[];"
           )
-          # Clang diagnoses a missing exit at the switch's default label in this
-          # source revision; insert explicit break at the default arms of this function.
-          fn_start = s2.index("void update_beacon_info(")
-          fn_end = s2.index("\n#ifdef CONFIG_DFS", fn_start)
-          fn = s2[fn_start:fn_end]
-          old_default = "\t\tdefault:\n\t\t\tbreak;"
-          # Use the actual preceding case boundary to add explicit breaks where
-          # the labels otherwise fall through to default.
-          for case_label in ("case _VENDOR_SPECIFIC_IE_:", "case _HT_EXTRA_INFO_IE_:", "case EID_OpModeNotification:", "case _ERPINFO_IE_:", "case _EXT_CAP_IE_:"):
-              pass
-          # The two diagnostics point at default labels; insert explicit break
-          # before the default label so no preceding conditional branch falls through.
-          if fn.count("\t\tdefault:") != 1:
-              raise SystemExit("update_beacon_info default label not unique")
-          fn = fn.replace("\t\tdefault:", "\t\tdefault:", 1)
-          s2 = s2[:fn_start] + fn + s2[fn_end:]
-          p.write_text(s2)
+
+          p = Path("include/wlan_bssdef.h")
+          s = p.read_text()
+          old = "typedef struct _NDIS_802_11_VARIABLE_IEs {\\n\\tu8  ElementID;\\n\\tu8  Length;\\n\\tu8  data[1];\\n} NDIS_802_11_VARIABLE_IEs, *PNDIS_802_11_VARIABLE_IEs;"
+          new = "typedef struct _NDIS_802_11_VARIABLE_IEs {\\n\\tu8  ElementID;\\n\\tu8  Length;\\n\\tu8  data[];\\n} NDIS_802_11_VARIABLE_IEs, *PNDIS_802_11_VARIABLE_IEs;"
+          if old not in s:
+              raise SystemExit("NDIS variable IE declaration not found")
+          p.write_text(s.replace(old, new, 1))
+
+          # The previous fall-through diagnostics are around beacon IE parsing.
+          p = Path("core/rtw_wlan_util.c")
+          lines = p.read_text().splitlines()
+          begin = next(i for i, line in enumerate(lines) if line.startswith("void update_beacon_info("))
+          finish = next(i for i in range(begin, len(lines)) if lines[i].startswith("#ifdef CONFIG_DFS"))
+          block = lines[begin:finish]
+
+          # Ensure every case arm exits the switch. Add the missing break directly
+          # before default where the switch body currently has no terminating break.
+          default_positions = [i for i, line in enumerate(block) if line.strip() == "default:"]
+          if len(default_positions) != 1:
+              raise SystemExit(f"update_beacon_info default labels: {len(default_positions)}")
+          d = default_positions[0]
+          if d == 0:
+              raise SystemExit("default label has no preceding switch content")
+          if block[d - 1].strip() != "break;":
+              block.insert(d, "\\t\\t\\tbreak;")
+          lines[begin:finish] = block
+          p.write_text("\\n".join(lines) + "\\n")
           PY
 
           make -C "$KDIR" M="$PWD" \
