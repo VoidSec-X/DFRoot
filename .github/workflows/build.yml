@@ -340,54 +340,60 @@ jobs:
               source = source.replace(old, new, 1)
           p.write_text(source)
 
-          # Match the Linux net_device_ops ndo_start_xmit CFI prototype.
-          # The upstream driver declared/defined rtw_xmit_entry as int, while
-          # the kernel callback type is netdev_tx_t (*)(struct sk_buff *,
-          # struct net_device *). Clang CFI rejects that incompatible target
-          # at dev_hard_start_xmit when the interface transmits its first frame.
+          # Keep the Realtek legacy TX helper intact. Export a dedicated
+          # ndo_start_xmit entry whose return type is the kernel's enum netdev_tx.
+          # The panic reports expected KCFI type ID 0x44e57e43; plain int produces
+          # 0xab1f26f7 even when the argument types are identical.
           p = Path("include/xmit_osdep.h")
           source = p.read_text()
-          old = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          new = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
-          already = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
-          compat = "extern netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          if old in source:
-              source = source.replace(old, new, 1)
-          elif compat in source:
-              source = source.replace(compat, new, 1)
-          elif already not in source:
-              raise SystemExit("xmit_osdep.h: Linux rtw_xmit_entry prototype not found")
+          legacy = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          prototype = "extern enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev);"
+          if source.count(legacy) != 1:
+              raise SystemExit("xmit_osdep.h: expected original legacy TX prototype exactly once")
+          if prototype not in source:
+              source = source.replace(legacy, legacy + "\\n" + prototype, 1)
           p.write_text(source)
 
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
-          old = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          compat = "netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          new = "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)"
-          if source.count(old) == 1:
-              source = source.replace(old, new, 1)
-          elif source.count(compat) == 1:
-              source = source.replace(compat, new, 1)
-          elif source.count(new) != 1:
-              raise SystemExit("xmit_linux.c: Linux rtw_xmit_entry definition not found or ambiguous")
+          legacy_def = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          wrapper = """enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev)
+          {
+              rtw_xmit_entry((_pkt *)skb, (_nic_hdl)dev);
+              return NETDEV_TX_OK;
+          }"""
+          if source.count(legacy_def) != 1:
+              raise SystemExit("xmit_linux.c: expected original legacy TX definition exactly once")
+          if "rtl8188eu_ndo_start_xmit(" not in source:
+              source = source.rstrip() + "\\n\\n" + wrapper + "\\n"
           p.write_text(source)
 
-          # Fix every other ndo_start_xmit callback assigned in net_device_ops.
-          for path, signature in (
+          # Both physical and virtual station interfaces use the typed callback.
+          p = Path("os_dep/linux/os_intfs.c")
+          source = p.read_text()
+          old = ".ndo_start_xmit = rtw_xmit_entry,"
+          new = ".ndo_start_xmit = rtl8188eu_ndo_start_xmit,"
+          if source.count(old) != 2:
+              raise SystemExit(f"os_intfs.c: expected two legacy ndo_start_xmit assignments, found {source.count(old)}")
+          p.write_text(source.replace(old, new))
+
+          # The monitor and hostapd management interfaces have their own
+          # ndo_start_xmit callbacks; make their return type the exact enum too.
+          for path, old, new in (
               ("os_dep/linux/ioctl_cfg80211.c",
-               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
+               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)",
+               "static enum netdev_tx rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
               ("os_dep/linux/mlme_linux.c",
-               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
+               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)",
+               "static enum netdev_tx mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
           ):
               p = Path(path)
               source = p.read_text()
-              fixed = signature.replace("static int ", "static netdev_tx_t ", 1)
-              if source.count(signature) == 1:
-                  source = source.replace(signature, fixed, 1)
-              elif source.count(fixed) != 1:
-                  raise SystemExit(f"{path}: expected one xmit callback signature")
+              if source.count(old) == 1:
+                  source = source.replace(old, new, 1)
+              elif source.count(new) != 1:
+                  raise SystemExit(f"{path}: callback signature not found or ambiguous")
               p.write_text(source)
-
           PY
 
           # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
@@ -433,7 +439,7 @@ jobs:
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-UCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+            KCFLAGS="-UCONFIG_NL80211_TESTMODE -Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-n.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
@@ -441,9 +447,15 @@ jobs:
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+            KCFLAGS="-DCONFIG_NL80211_TESTMODE -Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
-          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
+          KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtl8188eu_ndo_start_xmit" {print $2}')
+          if [ "$KCFI_ID" != "0000000044e57e43" ]; then
+            echo "::error::ndo_start_xmit KCFI hash mismatch: expected 0000000044e57e43, got ${KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified rtl8188eu_ndo_start_xmit KCFI type ID: $KCFI_ID"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
 
