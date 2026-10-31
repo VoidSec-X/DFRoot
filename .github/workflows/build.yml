@@ -427,9 +427,9 @@ jobs:
               raise SystemExit("usb_ops_linux.c: USB-buffer RX adapter cast anchor mismatch")
           source = source.replace("_adapter\t*padapter = (_adapter *)priv;",
                                   "_adapter\t*padapter = (_adapter *)(void *)priv;", 1)
-          if source.count("_adapter\t\t\t*padapter = (_adapter *)priv;") != 1:
+          if source.count("_adapter\t\t*padapter = (_adapter *)priv;") != 1:
               raise SystemExit("usb_ops_linux.c: skb-queue RX adapter cast anchor mismatch")
-          source = source.replace("_adapter\t\t\t*padapter = (_adapter *)priv;",
+          source = source.replace("_adapter\t\t*padapter = (_adapter *)priv;",
                                   "_adapter\t\t\t*padapter = (_adapter *)(void *)priv;", 1)
           p.write_text(source)
 
