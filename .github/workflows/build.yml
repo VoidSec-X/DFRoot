@@ -57,63 +57,82 @@ jobs:
           git clone --depth=1 --branch v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
           cd rtl8188eu
 
-          # Match the in-repo LKM Makefile's DDK environment and build invocation.
-          make -C "$KDIR" M="$PWD" clean
-          find . -type f \\( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \\) -delete
+          # Use the same DDK kernel build environment as dfroot.ko.
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
 
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           def replace_once(path, old, new):
               p = Path(path)
-              s = p.read_text()
-              if s.count(old) != 1:
-                  raise SystemExit(f"{path}: expected one exact match, got {s.count(old)}")
-              p.write_text(s.replace(old, new, 1))
+              source = p.read_text()
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
+              p.write_text(source.replace(old, new, 1))
 
+          # Convert zero/one-element trailing arrays to C flexible arrays.
           p = Path("include/ieee80211.h")
-          replace_once(
-              "include/ieee80211.h",
-              "struct ieee80211_info_element {\\n\\tu8 id;\\n\\tu8 len;\\n\\tu8 data[0];\\n} __attribute__((packed));",
-              "struct ieee80211_info_element {\\n\\tu8 id;\\n\\tu8 len;\\n\\tu8 data[];\\n} __attribute__((packed));"
-          )
-          replace_once(
-              "include/wlan_bssdef.h",
-              "\\tu8  data[1];",
-              "\\tu8  data[];"
-          )
+          source = p.read_text()
+          start = source.index("struct ieee80211_info_element {")
+          end = source.index("} __attribute__((packed));", start)
+          block = source[start:end]
+          if "u8 data[0];" not in block:
+              raise SystemExit("ieee80211_info_element: data[0] declaration not found")
+          source = source[:start] + block.replace("u8 data[0];", "u8 data[];", 1) + source[end:]
+          p.write_text(source)
 
-          # Correctly terminate the two RSN switch branches reported by Clang.
+          p = Path("include/wlan_bssdef.h")
+          source = p.read_text()
+          marker = "struct _NDIS_802_11_VARIABLE_IEs"
+          start = source.index(marker)
+          end = source.index("};", start)
+          block = source[start:end]
+          if "data[1]" not in block:
+              raise SystemExit("NDIS variable IE: data[1] declaration not found")
+          block = block.replace("data[1]", "data[]", 1)
+          p.write_text(source[:start] + block + source[end:])
+
+          # Add explicit breaks after conditional RSN returns to satisfy Clang.
           p = Path("core/rtw_wlan_util.c")
-          s = p.read_text()
-          patterns = [
-              (r"(case _RSN_IE_2_:\\n\\s*if \\(_rtw_memcmp\\(\\(pIE->data \\+ 8\\), RSN_TKIP_CIPHER, 4\\)\\)\\n\\s*return _TRUE;)\\n(\\s*default:)",
-               r"\\1\\n\\t\\t\\t\\tbreak;\\n\\n\\t\\t\\t\\2"),
-              (r"(case _RSN_IE_2_:\\n\\s*if \\(\\(_rtw_memcmp\\(\\(pIE->data \\+ 8\\), RSN_CIPHER_SUITE_CCMP, 4\\)\\)\\s*\\|\\|\\s*\\(_rtw_memcmp\\(\\(pIE->data \\+ 12\\), RSN_CIPHER_SUITE_CCMP, 4\\)\\)\\)\\n\\s*return _FALSE;)\\n(\\s*default:)",
-               r"\\1\\n\\t\\t\\t\\tbreak;\\n\\n\\t\\t\\t\\2")
-          ]
-          for pattern, repl in patterns:
-              s, n = re.subn(pattern, repl, s, count=1)
-              if n != 1:
-                  raise SystemExit(f"RSN switch fall-through patch match count={n}")
-          p.write_text(s)
+          lines = p.read_text().splitlines()
+          inserted = 0
+          i = 0
+          while i < len(lines) - 2:
+              if lines[i].strip() == "case _RSN_IE_2_:":
+                  j = i + 1
+                  while j < len(lines) and lines[j].strip() != "default:":
+                      if lines[j].strip() in ("return _TRUE;", "return _FALSE;"):
+                          indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                          lines.insert(j + 1, indent + "break;")
+                          inserted += 1
+                          j += 1
+                          break
+                      j += 1
+                  i = j
+              else:
+                  i += 1
+          if inserted < 2:
+              raise SystemExit(f"expected to patch both RSN case branches, patched {inserted}")
+          p.write_text("\n".join(lines) + "\n")
           PY
 
-          # Build like lkm/Makefile: DDK-provided KDIR/OBJCOPY, no extra
-          # CROSS_COMPILE or warning-suppression overrides.
-          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \\
-            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \\
-            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \\
-            KCFLAGS="-DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE" \\
+          make -C "$KDIR" M="$PWD" \
+            ARCH=arm64 \
+            LLVM=1 \
+            CONFIG_RTL8188EU=m \
+            CONFIG_RTL8188E=y \
+            CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y \
+            CONFIG_PLATFORM_I386_PC=n \
             modules
 
           test -s 8188eu.ko
-          llvm-objcopy --strip-unneeded \\
-            -R .comment -R .note.gnu.build-id -R .note.gnu.property \\
-            -R .note.Linux -R .note.GNU-stack \\
-            -R .BTF -R .BTF.base -R .llvm_addrsig \\
-            -R .hyp.text -R .hyp.bss -R .hyp.rodata -R .hyp.event_ids \\
+          llvm-objcopy --strip-unneeded \
+            -R .comment -R .note.gnu-build-id -R .note.gnu.property \
+            -R .note.Linux -R .note.GNU-stack \
+            -R .BTF -R .BTF.base -R .llvm_addrsig \
+            -R .hyp.text -R .hyp.bss -R .hyp.rodata -R .hyp.event_ids \
             -R .hyp.patchable_function_entries -R .hyp.data 8188eu.ko
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
