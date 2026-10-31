@@ -148,6 +148,22 @@ jobs:
           # Keep CONFIG_P2P enabled. The station driver retains its upstream
           # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
 
+          # The RTL8188EUS ops table places set_mac_acl inside CONFIG_AP_MODE,
+          # but preinit used to advertise max_acl_mac_addrs whenever ACL was enabled.
+          # cfg80211 rejects wiphy_register() when the limit is nonzero and the
+          # callback is absent. ACL is an AP feature, so advertise it only with AP mode.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = """#if CONFIG_RTW_MACADDR_ACL && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+          \twiphy->max_acl_mac_addrs = NUM_ACL;
+          #endif"""
+          new = """#if defined(CONFIG_AP_MODE) && CONFIG_RTW_MACADDR_ACL && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+          \twiphy->max_acl_mac_addrs = NUM_ACL;
+          #endif"""
+          if source.count(old) != 1:
+              raise SystemExit("ioctl_cfg80211.c: cannot gate max_acl_mac_addrs on CONFIG_AP_MODE")
+          p.write_text(source.replace(old, new, 1))
+
           # Add precise runtime diagnostics around cfg80211/netdev registration.
           p = Path("os_dep/linux/ioctl_cfg80211.c")
           source = p.read_text()
@@ -161,9 +177,12 @@ jobs:
               raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_register return")
           source = source.replace(old, new, 1)
           old = "\twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"
-          new = """\tpr_err("DFROOT: cfg80211 P2P callbacks start=%p stop=%p\\n",
+          new = """\tpr_err("DFROOT: ops remain=%p cancel_remain=%p start_p2p=%p stop_p2p=%p set_mac_acl=%p\\n",
+          \t\t (void *)rtw_cfg80211_ops.remain_on_channel,
+          \t\t (void *)rtw_cfg80211_ops.cancel_remain_on_channel,
           \t\t (void *)rtw_cfg80211_ops.start_p2p_device,
-          \t\t (void *)rtw_cfg80211_ops.stop_p2p_device);
+          \t\t (void *)rtw_cfg80211_ops.stop_p2p_device,
+          \t\t (void *)rtw_cfg80211_ops.set_mac_acl);
           \twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"""
           if source.count(old) != 1:
               raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_new call")
