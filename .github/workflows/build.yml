@@ -191,6 +191,16 @@ jobs:
           source = source.replace(old, new, 1)
           p.write_text(source)
 
+          # PHYDM TXAGC offset windows are bounded; OR made every value valid.
+          p = Path("hal/phydm/phydm_api.c")
+          source = p.read_text()
+          old = "if (power_offset > -8 || power_offset < 7)"
+          new = "if (power_offset > -8 && power_offset < 7)"
+          if source.count(old) != 1:
+              raise SystemExit("phydm_api.c: expected one 11N TXAGC range condition")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
           # Fix impossible PHYDM condition: a value cannot be both != 1 and != 2.
           p = Path("hal/phydm/phydm_debug.c")
           source = p.read_text()
