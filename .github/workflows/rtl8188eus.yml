@@ -27,6 +27,86 @@ jobs:
         run: |
           git clone --depth=1 --branch v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
 
+      - name: Patch legacy IE declarations and parsing
+        working-directory: rtl8188eu
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              source = file.read_text()
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one exact match, found {count}")
+              file.write_text(source.replace(old, new, 1))
+
+          # C99 flexible-array members replace legacy zero/one-length tails.
+          replace_once(
+              "include/ieee80211.h",
+              "\tu8 data[0];",
+              "\tu8 data[];",
+          )
+          replace_once(
+              "include/wlan_bssdef.h",
+              "\tUCHAR  data[1];",
+              "\tUCHAR  data[];",
+          )
+
+          # Validate IE payload lengths before reading fields from the IE body.
+          replace_once(
+              "core/rtw_mlme_ext.c",
+              """\t\t\tif (ie->id == WLAN_EID_CHANNEL_SWITCH) {
+          \t\t\t\tch_switch_mode = ie->data[0];""",
+              """\t\t\tif (ie->id == WLAN_EID_CHANNEL_SWITCH) {
+          \t\t\t\tif (ie->len < 3)
+          \t\t\t\t\tcontinue;
+          \t\t\t\tch_switch_mode = ie->data[0];""",
+          )
+          replace_once(
+              "core/rtw_mlme_ext.c",
+              """\t\t\t} else if (ie->id == WLAN_EID_SECONDARY_CHANNEL_OFFSET) {
+          \t\t\t\tch_offset = secondary_ch_offset_to_hal_ch_offset(ie->data[0]);""",
+              """\t\t\t} else if (ie->id == WLAN_EID_SECONDARY_CHANNEL_OFFSET) {
+          \t\t\t\tif (ie->len < 1)
+          \t\t\t\t\tcontinue;
+          \t\t\t\tch_offset = secondary_ch_offset_to_hal_ch_offset(ie->data[0]);""",
+          )
+
+          # These cases return on a match; otherwise they must not fall into default.
+          util = Path("core/rtw_wlan_util.c")
+          source = util.read_text()
+          old_cases = [
+              """\t\t\tcase _RSN_IE_2_:
+          \t\t\t\tif (_rtw_memcmp((pIE->data + 8), RSN_TKIP_CIPHER, 4))
+          \t\t\t\t\treturn _TRUE;
+
+          \t\t\tdefault:""",
+              """\t\t\tcase _RSN_IE_2_:
+          \t\t\t\tif ((_rtw_memcmp((pIE->data + 8), RSN_CIPHER_SUITE_CCMP, 4))  ||
+          \t\t\t\t    (_rtw_memcmp((pIE->data + 12), RSN_CIPHER_SUITE_CCMP, 4)))
+          \t\t\t\t\treturn _FALSE;
+
+          \t\t\tdefault:""",
+          ]
+          for old in old_cases:
+              if source.count(old) != 1:
+                  raise SystemExit("Expected RSN case with accidental fall-through not found exactly once")
+          source = source.replace(
+              old_cases[0],
+              old_cases[0].replace("\n\n\t\t\tdefault:", "\n\t\t\t\tbreak;\n\n\t\t\tdefault:"),
+              1,
+          )
+          source = source.replace(
+              old_cases[1],
+              old_cases[1].replace("\n\n\t\t\tdefault:", "\n\t\t\t\tbreak;\n\n\t\t\tdefault:"),
+              1,
+          )
+          util.write_text(source)
+          PY
+
       - name: Build 8188eu.ko
         working-directory: rtl8188eu
         env:
@@ -41,58 +121,7 @@ jobs:
           test -f "$KERNEL_SRC/Makefile"
           test -f "$KERNEL_SRC/.config"
 
-          # Apply minimal source-level compatibility fixes: missing switch breaks
-          # were accidental fall-through, and IE data is a variable-length tail.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          util = Path("core/rtw_wlan_util.c")
-          src = util.read_text()
-          src = src.replace(
-              """\t\t\tcase _RSN_IE_2_:
-          \t\t\t\tif (_rtw_memcmp((pIE->data + 8), RSN_TKIP_CIPHER, 4))
-          \t\t\t\t\treturn _TRUE;
-
-          \t\t\tdefault:""",
-              """\t\t\tcase _RSN_IE_2_:
-          \t\t\t\tif (_rtw_memcmp((pIE->data + 8), RSN_TKIP_CIPHER, 4))
-          \t\t\t\t\treturn _TRUE;
-          \t\t\t\tbreak;
-
-          \t\t\tdefault:""",
-              1,
-          )
-          src = src.replace(
-              """\t\t\tcase _RSN_IE_2_:
-          \t\t\t\tif ((_rtw_memcmp((pIE->data + 8), RSN_CIPHER_SUITE_CCMP, 4))  ||
-          \t\t\t\t    (_rtw_memcmp((pIE->data + 12), RSN_CIPHER_SUITE_CCMP, 4)))
-          \t\t\t\t\treturn _FALSE;
-
-          \t\t\tdefault:""",
-              """\t\t\tcase _RSN_IE_2_:
-          \t\t\t\tif ((_rtw_memcmp((pIE->data + 8), RSN_CIPHER_SUITE_CCMP, 4))  ||
-          \t\t\t\t    (_rtw_memcmp((pIE->data + 12), RSN_CIPHER_SUITE_CCMP, 4)))
-          \t\t\t\t\treturn _FALSE;
-          \t\t\t\tbreak;
-
-          \t\t\tdefault:""",
-              1,
-          )
-          if "case _RSN_IE_2_:" not in src:
-              raise SystemExit("Expected RSN switch cases not found")
-          util.write_text(src)
-
-          # Convert legacy one-byte trailing IE arrays to flexible arrays.
-          bss = Path("include/wlan_bssdef.h")
-          text = bss.read_text()
-          old = "\tUCHAR  data[1];"
-          if old not in text:
-              raise SystemExit("Expected variable IE data[1] declaration not found")
-          bss.write_text(text.replace(old, "\tUCHAR  data[];", 1))
-          PY
-
-          # Build with the DDK's Android ARM64 kernel/toolchain; no warning suppression.
-          make -C "$KERNEL_SRC" M="$PWD" clean || true
+          make -C "$KERNEL_SRC" M="$PWD" clean
           find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
 
           make -C "$KERNEL_SRC" \
@@ -111,7 +140,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
           file "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
-          modinfo "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko" || true
+          modinfo "$GITHUB_WORKSPACE/out/8188eu-android15-6.6.ko"
 
       - name: Upload RTL8188EUS kernel module
         uses: actions/upload-artifact@v7
