@@ -185,39 +185,20 @@ jobs:
           else:
               print("rtw_wiphy_alloc: set_wiphy_dev already present; skipping")
 
-          # Kernel 6.x: make the wiphy parent explicit at the point cfg80211
-          # resources are registered. rtw_cfg80211_ndev_res_register() registers
-          # the wiphy before either RTNL-aware netdev registration path below.
-          # Do not call rtw_wiphy_register() a second time here: that routine is
-          # already called by rtw_cfg80211_ndev_res_register().
+          # The driver already sets the wiphy parent in rtw_wiphy_alloc() before
+          # rtw_wiphy_register(). Keep upstream RTNL-aware netdev registration;
+          # never register the wiphy twice from os_intfs.c.
           p = Path("os_dep/linux/os_intfs.c")
           source = p.read_text()
-          anchor = """\tif (rtw_cfg80211_ndev_res_register(adapter) != _SUCCESS) {
-\t\trtw_warn_on(1);
-\t\tret = _FAIL;
-\t\tgoto exit;
-\t}"""
-          patched = """#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))
-\t/* Ensure cfg80211 has the owning USB device before wiphy registration. */
-\tif (adapter_to_wiphy(adapter))
-\t\tset_wiphy_dev(adapter_to_wiphy(adapter), dvobj_to_dev(dvobj));
-#endif
-\tif (rtw_cfg80211_ndev_res_register(adapter) != _SUCCESS) {
-\t\trtw_warn_on(1);
-\t\tret = _FAIL;
-\t\tgoto exit;
-\t}"""
-          if source.count(anchor) != 1:
-              raise SystemExit("os_intfs.c: cfg80211 resource registration block not found exactly once")
-          source = source.replace(anchor, patched, 1)
-          # Assert that wiphy registration remains before netdevice registration.
+          if "register_netdev(ndev)" not in source or "register_netdevice(ndev)" not in source:
+              raise SystemExit("os_intfs.c: expected RTNL-aware netdev registration paths not found")
           cfg_pos = source.index("rtw_cfg80211_ndev_res_register(adapter)")
-          netdev_pos = min(pos for token in ("register_netdev(ndev)", "register_netdevice(ndev)")
-                           if (pos := source.find(token, cfg_pos)) >= 0)
-          if cfg_pos >= netdev_pos:
-              raise SystemExit("os_intfs.c: cfg80211 registration must precede netdevice registration")
-          p.write_text(source)
-          print("os_intfs.c: explicit wiphy parent set; cfg80211-before-netdev order verified")
+          netdev_positions = [source.find(token, cfg_pos)
+                              for token in ("register_netdev(ndev)", "register_netdevice(ndev)")]
+          netdev_positions = [pos for pos in netdev_positions if pos >= 0]
+          if not netdev_positions:
+              raise SystemExit("os_intfs.c: netdev registration not found after cfg80211 setup")
+          print("os_intfs.c: cfg80211 setup remains before netdev registration")
 
           # Linux 6.6 removed the legacy association/disassociation helpers.
           # Replace the existing compatibility macro in-place, keeping exactly
@@ -320,6 +301,21 @@ jobs:
             CONFIG_PLATFORM_I386_PC=n \
             KCFLAGS="-DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" \
             modules
+
+          # Override only cfg80211's public ops declaration with the Realme
+          # AndroidB source header. This header is from kernel 6.6.89, whereas
+          # this handset reports 6.6.118; keep the provenance explicit and
+          # compare it against the DDK copy before using it.
+          REALME_CFG="$GITHUB_WORKSPACE/kernel-headers/realme-androidb/include/net/cfg80211.h"
+          test -s "$REALME_CFG"
+          test -s "$KDIR/include/net/cfg80211.h"
+          cp "$KDIR/include/net/cfg80211.h" "$RUNNER_TEMP/cfg80211.h.ddk"
+          echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
+          echo "Realme source cfg80211.h sha256:"
+          sha256sum "$REALME_CFG"
+          echo "DDK cfg80211.h sha256:"
+          sha256sum "$RUNNER_TEMP/cfg80211.h.ddk"
+          cp "$REALME_CFG" "$KDIR/include/net/cfg80211.h"
 
           test -s 8188eu.ko
           llvm-objcopy --strip-unneeded \
