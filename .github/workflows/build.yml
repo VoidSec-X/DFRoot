@@ -54,6 +54,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          KERNEL_RELEASE="$(make -s -C "$KDIR" kernelrelease)"
+          echo "DDK kernelrelease: $KERNEL_RELEASE"
+          if [ "$KERNEL_RELEASE" != "6.6.127-4k" ]; then
+            echo "::error::Expected Android 15 kernel 6.6.127-4k, got $KERNEL_RELEASE"
+            exit 1
+          fi
+          grep -q '^CONFIG_CFI_CLANG=y' "$KDIR/.config"
+          grep -q '^CONFIG_MODVERSIONS=y' "$KDIR/.config"
           git clone --depth=1 --branch v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eu
           cd rtl8188eu
 
@@ -670,6 +678,20 @@ jobs:
             exit 1
           fi
           echo "Verified usb_recv_tasklet KCFI type ID: $TASKLET_KCFI_ID"
+          for callback in rtw_cfg80211_monitor_if_xmit_entry mgnt_xmit_entry; do
+            CALLBACK_ID=$(llvm-readelf -sW 8188eu.ko | awk -v sym="__kcfi_typeid_$callback" '$8 == sym {print $2}')
+            if [ -n "$CALLBACK_ID" ] && [ "$CALLBACK_ID" != "0000000044e57e43" ]; then
+              echo "::error::$callback KCFI type ID mismatch: $CALLBACK_ID"
+              exit 1
+            fi
+            echo "$callback KCFI type ID: ${CALLBACK_ID:-not-emitted; compiler type checks remain enabled}"
+          done
+          VERMAGIC="$(strings 8188eu.ko | sed -n 's/^vermagic=//p')"
+          echo "RTL8188EUS vermagic: $VERMAGIC"
+          case "$VERMAGIC" in
+            6.6.127-4k*) ;;
+            *) echo "::error::Module vermagic is not 6.6.127-4k"; exit 1 ;;
+          esac
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
