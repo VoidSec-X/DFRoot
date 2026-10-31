@@ -1,4 +1,4 @@
-name: Build
+name: rtl8188eu-mon
 
 on:
   push:
