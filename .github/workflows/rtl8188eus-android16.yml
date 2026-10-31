@@ -58,14 +58,14 @@ jobs:
 
           path = Path("include/ieee80211.h")
           source = path.read_text()
-          pattern = r"(struct\\s+ieee80211_info_element\\s*\\{\\s*u8\\s+id\\s*;\\s*u8\\s+len\\s*;\\s*)u8\\s+data\\s*\\[\\s*0\\s*\\]\\s*;"
-          patched, count = re.subn(pattern, r"\\1u8 data[];", source, count=1)
+          pattern = r"(struct\s+ieee80211_info_element\s*\{\s*u8\s+id\s*;\s*u8\s+len\s*;\s*)u8\s+data\s*\[\s*0\s*\]\s*;"
+          patched, count = re.subn(pattern, r"\1u8 data[];", source, count=1)
           if count != 1:
               raise SystemExit("Could not uniquely patch ieee80211_info_element.data[0]")
           path.write_text(patched)
 
           check = path.read_text()
-          if not re.search(r"struct\\s+ieee80211_info_element\\s*\\{[^}]*u8\\s+data\\s*\\[\\s*\\]", check, re.S):
+          if not re.search(r"struct\s+ieee80211_info_element\s*\{[^}]*u8\s+data\s*\[\s*\]", check, re.S):
               raise SystemExit("Flexible-array verification failed")
           PY
 
