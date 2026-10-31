@@ -145,49 +145,8 @@ jobs:
           if "#define RTW_SINGLE_WIPHY" in source:
               raise SystemExit("RTW_SINGLE_WIPHY unexpectedly enabled; refusing to change wiphy mode")
 
-          # Android 6.6 cfg80211 validates start_p2p_device/stop_p2p_device
-          # as a paired callback set in wiphy_new_nm(). This USB station
-          # driver does not need a dedicated P2P-device wiphy, so disable
-          # CONFIG_P2P for this external-module build and leave both ops NULL.
-          import re
-          source, p2p_count = re.subn(
-              r"^\s*#define CONFIG_P2P\s*$",
-              "/* #undef CONFIG_P2P: no dedicated P2P-device ops */",
-              source, count=1, flags=re.M
-          )
-          if p2p_count != 1:
-              raise SystemExit("autoconf.h: expected exactly one CONFIG_P2P define")
-          p.write_text(source)
-
-          # CONFIG_P2P is disabled for this station-only cfg80211 build.
-          # Keep the four P2P timer cancellations conditional as well.
-          p = Path("os_dep/linux/os_intfs.c")
-          source = p.read_text()
-
-          # CONFIG_P2P is disabled above, so guard both the P2P-only adapter
-          # member and every use of it. Other timer cancellations stay active.
-          import re
-          source, decl_count = re.subn(
-              r"(?m)^([ \\t]*)struct wifidirect_info \\*pwdinfo = &padapter->wdinfo;[ \\t]*$",
-              r"#ifdef CONFIG_P2P\\n\\1struct wifidirect_info *pwdinfo = &padapter->wdinfo;\\n#endif /* CONFIG_P2P */",
-              source, count=1
-          )
-          if decl_count != 1:
-              raise SystemExit("os_intfs.c: cannot locate P2P wdinfo declaration")
-
-          old = """\t_cancel_timer_ex(&pwdinfo->find_phase_timer);
-          \t_cancel_timer_ex(&pwdinfo->restore_p2p_state_timer);
-          \t_cancel_timer_ex(&pwdinfo->pre_tx_scan_timer);
-          \t_cancel_timer_ex(&pwdinfo->reset_ch_sitesurvey);"""
-          new = """#ifdef CONFIG_P2P
-          \t_cancel_timer_ex(&pwdinfo->find_phase_timer);
-          \t_cancel_timer_ex(&pwdinfo->restore_p2p_state_timer);
-          \t_cancel_timer_ex(&pwdinfo->pre_tx_scan_timer);
-          \t_cancel_timer_ex(&pwdinfo->reset_ch_sitesurvey);
-          #endif /* CONFIG_P2P */"""
-          if source.count(old) != 1:
-              raise SystemExit("os_intfs.c: expected four P2P timer cancellations")
-          p.write_text(source.replace(old, new, 1))
+          # Keep CONFIG_P2P enabled. The station driver retains its upstream
+          # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
 
           # Android 15 exports filp_open() and kernel_read() in the VFS namespace.
           # Import that namespace so modpost metadata permits loading this driver.
