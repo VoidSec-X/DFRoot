@@ -157,6 +157,12 @@ jobs:
           merge-multiple: true
           path: app/src/main/jni/ko/
 
+      - name: Download RTL8188EUS module
+        uses: actions/download-artifact@v7
+        with:
+          name: rtl8188eus-android16-6.12
+          path: app/src/main/jni/ko/
+
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
