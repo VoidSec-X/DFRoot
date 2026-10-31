@@ -146,6 +146,15 @@ jobs:
               raise SystemExit("RTW_SINGLE_WIPHY unexpectedly enabled; refusing to change wiphy mode")
           p.write_text(source)
 
+          # Android 15 exports filp_open() and kernel_read() in the VFS namespace.
+          # Import that namespace so modpost metadata permits loading this driver.
+          p = Path("os_dep/osdep_service.c")
+          source = p.read_text()
+          import_stmt = "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);"
+          if import_stmt not in source:
+              source = source.rstrip() + "\n\n" + import_stmt + "\n"
+          p.write_text(source)
+
           # Linux 6.6 removed the legacy association/disassociation helpers.
           # Replace the existing compatibility macro in-place, keeping exactly
           # one definition and preserving the original cfg80211 notification flow.
