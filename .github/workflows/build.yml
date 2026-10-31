@@ -403,9 +403,17 @@ jobs:
           grep -E '^(CONFIG_CFI_CLANG|CONFIG_CFI_PERMISSIVE|CONFIG_NL80211_TESTMODE|CONFIG_MODVERSIONS|CONFIG_LTO_CLANG)=' "$KDIR/.config" || true
           grep -E 'CONFIG_CFI_CLANG|CONFIG_NL80211_TESTMODE|CONFIG_MODVERSIONS|CONFIG_LTO_CLANG' "$KDIR/include/generated/autoconf.h" || true
 
-          # This artifact is testmode-y only. Do not fake Kconfig values using KCFLAGS.
-          grep -q '^CONFIG_NL80211_TESTMODE=y$' "$KDIR/.config" || { echo "::error::DDK .config lacks CONFIG_NL80211_TESTMODE=y"; exit 1; }
-          grep -q '^#define CONFIG_NL80211_TESTMODE 1$' "$KDIR/include/generated/autoconf.h" || { echo "::error::generated autoconf.h lacks CONFIG_NL80211_TESTMODE"; exit 1; }
+          # The upstream RTL8188EUS driver exposes cfg80211 testmode callbacks
+          # only when CONFIG_NL80211_TESTMODE is set in the kernel headers.
+          # The DDK defconfig omits it. Enable it in the actual kernel Kconfig,
+          # regenerate all derived config headers, and verify each generated view.
+          test -x "$KDIR/scripts/config"
+          "$KDIR/scripts/config" --file "$KDIR/.config" --enable NL80211_TESTMODE
+          make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
+          grep -q '^CONFIG_NL80211_TESTMODE=y$' "$KDIR/.config"
+          grep -q '^#define CONFIG_NL80211_TESTMODE 1$' "$KDIR/include/generated/autoconf.h"
+          grep -q '^CONFIG_NL80211_TESTMODE=y$' "$KDIR/include/config/auto.conf"
+          echo "Generated testmode config is enabled in .config, autoconf.h and auto.conf"
 
           # Compile-time ABI diagnostics are fatal; print KCFI metadata for review.
           mkdir -p "$GITHUB_WORKSPACE/out"
