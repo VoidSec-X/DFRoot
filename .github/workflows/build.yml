@@ -93,28 +93,32 @@ jobs:
           block = block.replace("data[1]", "data[]", 1)
           p.write_text(source[:start] + block + source[end:])
 
-          # Clang flags intentional RSN case fallthrough as misleading-indentation.
-          # Add an explicit break at the end of each _RSN_IE_2_ case block.
+          # Fix only the two compiler-reported RSN fallthrough sites.
           p = Path("core/rtw_wlan_util.c")
-          source = p.read_text()
-          case_marker = "case _RSN_IE_2_:"
-          positions = []
-          offset = 0
-          while True:
-              pos = source.find(case_marker, offset)
-              if pos < 0:
-                  break
-              default_pos = source.find("default:", pos)
-              if default_pos < 0:
-                  raise SystemExit("RSN case has no following default label")
-              positions.append(default_pos)
-              offset = default_pos + len("default:")
-          if len(positions) != 2:
-              raise SystemExit(f"expected exactly two RSN cases, found {len(positions)}")
-          for pos in reversed(positions):
-              line_start = source.rfind("\\n", 0, pos) + 1
-              source = source[:line_start] + "\\t\\tbreak;\\n" + source[line_start:]
-          p.write_text(source)
+          lines = p.read_text().splitlines()
+          patched = 0
+          for n, line in enumerate(lines):
+              if line.strip() != "case _RSN_IE_2_:":
+                  continue
+              # Ignore unrelated switch cases; only these branches contain
+              # the returns in the cipher-suite parser that trigger Clang.
+              stop = next((m for m in range(n + 1, len(lines))
+                           if lines[m].strip() in ("default:", "case _RSN_IE_1_:")), len(lines))
+              block = lines[n:stop]
+              returns = [m for m, text in enumerate(block)
+                         if text.strip() in ("return _TRUE;", "return _FALSE;")]
+              if not returns:
+                  continue
+              ret = n + returns[-1]
+              if ret + 1 < len(lines) and lines[ret + 1].strip() == "break;":
+                  continue
+              # Put break at case indentation so it is outside the if body.
+              case_indent = line[:len(line) - len(line.lstrip())]
+              lines.insert(ret + 1, case_indent + "break;")
+              patched += 1
+          if patched != 2:
+              raise SystemExit(f"expected to patch two RSN cipher branches, patched {patched}")
+          p.write_text("\\n".join(lines) + "\\n")
           PY
 
           make -C "$KDIR" M="$PWD" \
