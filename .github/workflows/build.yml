@@ -403,6 +403,48 @@ jobs:
               elif source.count(new) != 1:
                   raise SystemExit(f"{path}: callback signature not found or ambiguous")
               p.write_text(source)
+          # The upstream USB RX tasklet passed usb_recv_tasklet(void *) through
+          # an incompatible cast to tasklet_init(void (*)(unsigned long)).
+          # KCFI checks the real function type at tasklet dispatch time. Make
+          # both RX implementations and the public declaration use the exact
+          # legacy tasklet callback ABI, then remove the cast at registration.
+          p = Path("include/usb_ops_linux.h")
+          source = p.read_text()
+          old = "void usb_recv_tasklet(void *priv);"
+          new = "void usb_recv_tasklet(unsigned long priv);"
+          if source.count(old) != 1:
+              raise SystemExit("usb_ops_linux.h: expected one usb_recv_tasklet prototype")
+          p.write_text(source.replace(old, new, 1))
+
+          p = Path("os_dep/linux/usb_ops_linux.c")
+          source = p.read_text()
+          old_sig = "void usb_recv_tasklet(void *priv)"
+          new_sig = "void usb_recv_tasklet(unsigned long priv)"
+          if source.count(old_sig) != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected two RX tasklet implementations, found {source.count(old_sig)}")
+          source = source.replace(old_sig, new_sig)
+          if source.count("_adapter\t*padapter = (_adapter *)priv;") != 1:
+              raise SystemExit("usb_ops_linux.c: USB-buffer RX adapter cast anchor mismatch")
+          source = source.replace("_adapter\t*padapter = (_adapter *)priv;",
+                                  "_adapter\t*padapter = (_adapter *)(void *)priv;", 1)
+          if source.count("_adapter\t\t\t*padapter = (_adapter *)priv;") != 1:
+              raise SystemExit("usb_ops_linux.c: skb-queue RX adapter cast anchor mismatch")
+          source = source.replace("_adapter\t\t\t*padapter = (_adapter *)priv;",
+                                  "_adapter\t\t\t*padapter = (_adapter *)(void *)priv;", 1)
+          p.write_text(source)
+
+          p = Path("hal/hal_hci/hal_usb.c")
+          source = p.read_text()
+          old = """tasklet_init(&precvpriv->recv_tasklet,
+          	     (void(*)(unsigned long))usb_recv_tasklet,
+          	     (unsigned long)padapter);"""
+          new = """tasklet_init(&precvpriv->recv_tasklet,
+          	     usb_recv_tasklet,
+          	     (unsigned long)padapter);"""
+          if source.count(old) != 1:
+              raise SystemExit("hal_usb.c: expected one casted recv tasklet registration")
+          p.write_text(source.replace(old, new, 1))
+
           PY
 
           # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
@@ -464,6 +506,12 @@ jobs:
             exit 1
           fi
           echo "Verified rtl8188eu_ndo_start_xmit KCFI type ID: $KCFI_ID"
+          TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_usb_recv_tasklet" {print $2}')
+          if [ "$TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
+            echo "::error::usb_recv_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${TASKLET_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified usb_recv_tasklet KCFI type ID: $TASKLET_KCFI_ID"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
