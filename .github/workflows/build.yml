@@ -647,6 +647,17 @@ jobs:
           if source.count(old) != 1:
               raise SystemExit("monitor xmit: data-frame skb_pull validation anchor not found exactly once")
           source = source.replace(old, new, 1)
+          # rtw_action_frame_parse reads category/action bytes immediately
+          # after the 24-byte header but does not validate frame_len itself.
+          # Reject short injected action frames before that parser dereferences them.
+          old = """\t\tif (rtw_action_frame_parse(buf, len, &category, &action) == _FALSE) {"""
+          new = """\t\tif (unlikely(len < sizeof(struct rtw_ieee80211_hdr_3addr) + 2))
+          \t\t\tgoto fail;
+
+          \t\tif (rtw_action_frame_parse(buf, len, &category, &action) == _FALSE) {"""
+          if source.count(old) != 1:
+              raise SystemExit("monitor action parser guard anchor not found exactly once")
+          source = source.replace(old, new, 1)
           p.write_text(source)
 
           PY
@@ -710,6 +721,12 @@ jobs:
             exit 1
           fi
           echo "Verified rtl8188eu_ndo_start_xmit KCFI type ID: $KCFI_ID"
+          MONITOR_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtw_cfg80211_monitor_if_xmit_entry" {print $2}')
+          if [ "$MONITOR_KCFI_ID" != "0000000044e57e43" ]; then
+            echo "::error::monitor ndo_start_xmit KCFI hash mismatch: expected 0000000044e57e43, got ${MONITOR_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified monitor ndo_start_xmit KCFI type ID: $MONITOR_KCFI_ID"
           TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_usb_recv_tasklet" {print $2}')
           if [ "$TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
             echo "::error::usb_recv_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${TASKLET_KCFI_ID:-missing}"
