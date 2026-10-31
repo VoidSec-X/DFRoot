@@ -148,12 +148,32 @@ jobs:
           # Keep CONFIG_P2P enabled. The station driver retains its upstream
           # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
 
+          # Enable the driver's existing monitor-mode implementation. The
+          # upstream wiphy advertises MONITOR only when CONFIG_WIFI_MONITOR
+          # is set (CONFIG_AP_MODE is already enabled in this build).
+          p = Path("include/autoconf.h")
+          source = p.read_text()
+          if "#define CONFIG_WIFI_MONITOR" not in source:
+              old = "#define CONFIG_AP_MODE"
+              if source.count(old) != 1:
+                  raise SystemExit("autoconf.h: CONFIG_AP_MODE anchor not found exactly once")
+              source = source.replace(old, old + "\n#define CONFIG_WIFI_MONITOR", 1)
+              p.write_text(source)
+
           # Harden the cfg80211 scan callback for wildcard/empty-SSID scans.
-          # cfg80211 may issue a scan with n_ssids == 0; never dereference
-          # request->ssids[0] in that case. Validate the request arrays before
-          # the legacy Realtek scan path copies their contents.
+          # Validate request before reading its members; SSIDs are inline arrays.
           p = Path("os_dep/linux/ioctl_cfg80211.c")
           source = p.read_text()
+          old = "struct cfg80211_ssid *ssids = request->ssids;"
+          new = "struct cfg80211_ssid *ssids;"
+          if source.count(old) != 1:
+              raise SystemExit("scan: unsafe ssids initializer not found exactly once")
+          source = source.replace(old, new, 1)
+          old = "\tif (!request)\n\t\treturn -EINVAL;\n\tpr_err("
+          new = "\tif (!request)\n\t\treturn -EINVAL;\n\tssids = request->ssids;\n\tpr_err("
+          if source.count(old) != 1:
+              raise SystemExit("scan: request guard/breadcrumb anchor not found exactly once")
+          source = source.replace(old, new, 1)
           old = "\twdev = request->wdev;"
           new = """\twdev = request->wdev;
           \tif (!wdev) {
@@ -166,12 +186,21 @@ jobs:
 
           old = """\tpwdev_priv = adapter_wdev_data(padapter);
           \tpmlmepriv = &padapter->mlmepriv;"""
-          new = """\tif ((request->n_ssids && !request->ssids) ||
+          new = """\tif (request->n_ssids < 0 ||
+          \t    (request->n_ssids && !ssids) ||
           \t    (request->n_channels && !request->channels) ||
           \t    request->n_ssids > RTW_SSID_SCAN_AMOUNT ||
-          \t    request->n_channels > RTW_CHANNEL_SCAN_AMOUNT) {
+          \t    request->n_channels > RTW_CHANNEL_SCAN_AMOUNT ||
+          \t    (request->ie_len && !request->ie)) {
           \t\tret = -EINVAL;
           \t\tgoto exit;
+          \t}
+          \t/* SSID elements contain inline arrays; validate lengths before P2P. */
+          \tfor (i = 0; i < request->n_ssids; i++) {
+          \t\tif (ssids[i].ssid_len > sizeof(parm.ssid[i].Ssid)) {
+          \t\t\tret = -EINVAL;
+          \t\t\tgoto exit;
+          \t\t}
           \t}
           \t/* Validate every channel before the P2P social-channel fast path
           \t * dereferences channels[0..2]. */
@@ -190,7 +219,7 @@ jobs:
           old = """\t\tif (ssids->ssid != NULL
           \t\t\t&& _rtw_memcmp(ssids->ssid, "DIRECT-", 7)"""
           new = """\t\tif (request->n_ssids > 0 && ssids != NULL &&
-          \t\t    ssids[0].ssid != NULL && ssids[0].ssid_len >= 7
+          \t\t    ssids[0].ssid_len >= 7
           \t\t\t&& _rtw_memcmp(ssids[0].ssid, "DIRECT-", 7)"""
           if source.count(old) != 1:
               raise SystemExit("ioctl_cfg80211.c: wildcard SSID/P2P dereference not found exactly once")
@@ -198,7 +227,7 @@ jobs:
 
           old = """\t\t_rtw_memcpy(&parm.ssid[i].Ssid, ssids[i].ssid, ssids[i].ssid_len);
           \t\tparm.ssid[i].SsidLength = ssids[i].ssid_len;"""
-          new = """\t\tif (!ssids[i].ssid || ssids[i].ssid_len > sizeof(parm.ssid[i].Ssid)) {
+          new = """\t\tif (ssids[i].ssid_len > sizeof(parm.ssid[i].Ssid)) {
           \t\t\tret = -EINVAL;
           \t\t\tgoto exit;
           \t\t}
@@ -565,7 +594,7 @@ jobs:
 
           old = """\t\tskb_pull(skb, dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2);
           \t\tpdata = (unsigned char *)skb->data;"""
-          new = """\t\tif (unlikely(skb->len < dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2))
+          new = """\t\tif (unlikely(skb->len < dot11_hdr_len + qos_len + snap_len))
           \t\t\tgoto fail;
           \t\tskb_pull(skb, dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2);
           \t\tpdata = (unsigned char *)skb->data;"""
