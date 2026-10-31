@@ -154,14 +154,14 @@ jobs:
           old = "\treturn wiphy_register(wiphy);"
           new = """\t{
           \t\tint ret = wiphy_register(wiphy);
-          \t\tRTW_INFO("DFROOT: wiphy_register(%p) returned %d\\n", wiphy, ret);
+          \t\tpr_err("DFROOT: wiphy_register(%p) returned %d\\n", wiphy, ret);
           \t\treturn ret;
           \t}"""
           if source.count(old) != 1:
               raise SystemExit("ioctl_cfg80211.c: cannot locate wiphy_register return")
           source = source.replace(old, new, 1)
           old = "\twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"
-          new = """\tRTW_INFO("DFROOT: cfg80211 P2P callbacks start=%p stop=%p\\n",
+          new = """\tpr_err("DFROOT: cfg80211 P2P callbacks start=%p stop=%p\\n",
           \t\t (void *)rtw_cfg80211_ops.start_p2p_device,
           \t\t (void *)rtw_cfg80211_ops.stop_p2p_device);
           \twiphy = wiphy_new(&rtw_cfg80211_ops, sizeof(struct rtw_wiphy_data));"""
@@ -181,11 +181,11 @@ jobs:
           \telse
           \t\tret = register_netdevice(ndev);
           \tif (ret) {
-          \t\tRTW_ERR("DFROOT: netdev registration failed name=%s errno=%d\\n",
+          \t\tpr_err("DFROOT: netdev registration failed name=%s errno=%d\\n",
           \t\t\tndev->name, ret);
           \t\tret = _FAIL;
           \t} else {
-          \t\tRTW_INFO("DFROOT: netdev registered name=%s\\n", ndev->name);
+          \t\tpr_err("DFROOT: netdev registered name=%s\\n", ndev->name);
           \t\tret = _SUCCESS;
           \t}"""
           if source.count(old) != 1:
