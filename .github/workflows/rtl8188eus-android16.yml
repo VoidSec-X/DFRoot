@@ -54,7 +54,7 @@ jobs:
           # Android 16 Clang compatibility fixes.
           python3 - <<'PY'
           from pathlib import Path
-
+          
           def replace_in_struct(path, begin, end, old, new):
               p = Path(path)
               s = p.read_text()
@@ -62,9 +62,9 @@ jobs:
               j = s.index(end, i)
               part = s[i:j]
               if part.count(old) != 1:
-                  raise SystemExit(f"{path}: {old!r} count={part.count(old)}")
+                  raise SystemExit(f"{path}: expected one {old!r}, got {part.count(old)}")
               p.write_text(s[:i] + part.replace(old, new, 1) + s[j:])
-
+          
           replace_in_struct(
               "include/ieee80211.h",
               "struct ieee80211_info_element {",
@@ -77,18 +77,30 @@ jobs:
               "} NDIS_802_11_VARIABLE_IEs, *PNDIS_802_11_VARIABLE_IEs;",
               "data[1]", "data[]"
           )
-
+          
+          # Clang 18 reports two preprocessed switch fall-throughs at the
+          # default labels of update_beacon_info. Make the switch exits explicit.
           p = Path("core/rtw_wlan_util.c")
           s = p.read_text()
           start = s.index("void update_beacon_info(")
           end = s.index("\n#ifdef CONFIG_DFS", start)
           fn = s[start:end]
-          # Add a distinct terminating case before default; no compiler flags suppressed.
-          marker = "default:"
-          if fn.count(marker) != 1:
-              raise SystemExit(f"update_beacon_info default count={fn.count(marker)}")
-          fn = fn.replace(marker, "case 0xff:\n\t\t\tbreak;\n\t\t" + marker, 1)
-          p.write_text(s[:start] + fn + s[end:])
+          # Insert a break immediately before each default label in this function.
+          # The preceding case may have a conditional last statement, so ensure
+          # the switch cannot fall through when optional case arms are disabled.
+          lines = fn.splitlines()
+          patched = []
+          inserted = 0
+          for line in lines:
+              if line.strip() == "default:":
+                  if not patched or patched[-1].strip() != "break;":
+                      indent = line[:len(line) - len(line.lstrip())]
+                      patched.append(indent + "\tbreak;")
+                      inserted += 1
+              patched.append(line)
+          if inserted != 2:
+              raise SystemExit(f"expected 2 implicit-fallthrough fixes, inserted {inserted}")
+          p.write_text(s[:start] + "\n".join(patched) + s[end:])
           PY
           grep -A4 -F 'struct ieee80211_info_element {' include/ieee80211.h
           grep -A4 -F 'typedef struct _NDIS_802_11_VARIABLE_IEs {' include/wlan_bssdef.h
