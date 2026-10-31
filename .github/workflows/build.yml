@@ -191,6 +191,15 @@ jobs:
           source = source.replace(old, new, 1)
           p.write_text(source)
 
+          # Fix impossible PHYDM condition: a value cannot be both != 1 and != 2.
+          p = Path("hal/phydm/phydm_debug.c")
+          source = p.read_text()
+          old = "if (rx_ht != 2 || rx_ht != 1)"
+          new = "if (rx_ht != 2 && rx_ht != 1)"
+          if source.count(old) != 1:
+              raise SystemExit("phydm_debug.c: expected one impossible rx_ht condition")
+          p.write_text(source.replace(old, new, 1))
+
           # Clang 6.6 diagnoses redundant parentheses around this comparison.
           p = Path("hal/rtl8188e/usb/usb_halinit.c")
           source = p.read_text()
