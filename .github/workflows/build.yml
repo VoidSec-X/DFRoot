@@ -103,7 +103,13 @@ jobs:
                   j = i + 1
                   while j < len(lines) and lines[j].strip() != "default:":
                       if lines[j].strip() in ("return _TRUE;", "return _FALSE;"):
-                          indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                          # Align break with the controlling if, not its return body.
+                          k = j - 1
+                          while k > i and not lines[k].strip().startswith("if "):
+                              k -= 1
+                          if k <= i:
+                              raise SystemExit("RSN return has no matching if statement")
+                          indent = lines[k][:len(lines[k]) - len(lines[k].lstrip())]
                           lines.insert(j + 1, indent + "break;")
                           inserted += 1
                           j += 1
