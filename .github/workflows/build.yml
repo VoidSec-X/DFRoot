@@ -185,19 +185,6 @@ jobs:
           else:
               print("rtw_wiphy_alloc: set_wiphy_dev already present; skipping")
 
-          # Use ONLY Realme's matching cfg80211 public header for this device family.
-          # Do not import or build the full Realme kernel source tree. Pin the
-          # exact kernel-source commit so cfg80211_ops layout (including Android
-          # KABI reserves and MLO fields) matches the vendor cfg80211 implementation.
-          REALME_KERNEL_COMMIT="e41cd70050525492495565b955451ab6f2d6fb78"
-          REALME_CFG_URL="https://raw.githubusercontent.com/realme-kernel-opensource/realme_12plus-5G_Narzo70_Narzo70pro_P1-5G-AndroidB-kernel-source/${REALME_KERNEL_COMMIT}/include/net/cfg80211.h"
-          test -f "$KDIR/include/net/cfg80211.h"
-          test -f "$KDIR/include/linux/android_kabi.h"
-          curl --fail --location --retry 3 "$REALME_CFG_URL" -o /tmp/realme-cfg80211.h
-          grep -q 'ANDROID_KABI_RESERVE(1)' /tmp/realme-cfg80211.h
-          grep -q 'struct cfg80211_ops' /tmp/realme-cfg80211.h
-          install -m 0644 /tmp/realme-cfg80211.h "$KDIR/include/net/cfg80211.h"
-          echo "Using Realme cfg80211.h from ${REALME_KERNEL_COMMIT}; no other Realme kernel sources imported."
 
           # Linux 6.6 removed the legacy association/disassociation helpers.
           # Replace the existing compatibility macro in-place, keeping exactly
@@ -304,6 +291,20 @@ jobs:
           echo "DDK cfg80211.h sha256:"
           sha256sum "$RUNNER_TEMP/cfg80211.h.ddk"
           cp "$REALME_CFG" "$KDIR/include/net/cfg80211.h"
+
+          # Use ONLY Realme's public cfg80211 header. No Realme kernel source
+          # tree is cloned/built. Restore the DDK header after the module build,
+          # so the shared kernel build tree is not left modified for other LKMs.
+          REALME_KERNEL_COMMIT="e41cd70050525492495565b955451ab6f2d6fb78"
+          REALME_CFG_URL="https://raw.githubusercontent.com/realme-kernel-opensource/realme_12plus-5G_Narzo70_Narzo70pro_P1-5G-AndroidB-kernel-source/${REALME_KERNEL_COMMIT}/include/net/cfg80211.h"
+          test -s "$KDIR/include/net/cfg80211.h"
+          test -s "$KDIR/include/linux/android_kabi.h"
+          curl --fail --location --retry 3 "$REALME_CFG_URL" -o "$RUNNER_TEMP/cfg80211.h.realme"
+          grep -q 'struct cfg80211_ops' "$RUNNER_TEMP/cfg80211.h.realme"
+          cp "$KDIR/include/net/cfg80211.h" "$RUNNER_TEMP/cfg80211.h.ddk"
+          trap 'cp "$RUNNER_TEMP/cfg80211.h.ddk" "$KDIR/include/net/cfg80211.h"' EXIT
+          cp "$RUNNER_TEMP/cfg80211.h.realme" "$KDIR/include/net/cfg80211.h"
+          echo "Using Realme cfg80211.h only (commit ${REALME_KERNEL_COMMIT}); not importing full kernel source."
 
           make -C "$KDIR" M="$PWD" \
             ARCH=arm64 \
