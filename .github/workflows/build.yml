@@ -155,39 +155,43 @@ jobs:
               source = source.rstrip() + "\n\n" + import_stmt + "\n"
           p.write_text(source)
 
-          # Linux 6.x cfg80211 expects the wiphy to be associated with its
-          # parent device before registration. Keep the existing wiphy allocation
-          # and lifecycle; set the device immediately after allocation.
-          p = Path("os_dep/linux/os_intfs.c")
+          # Linux 6.x cfg80211 needs the wiphy parent device set before registration.
+          # rtw_wiphy_alloc() lives in ioctl_cfg80211.c; it already receives the dvobj
+          # device, so patch its real allocation implementation, not os_intfs.c.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
           source = p.read_text()
-          if "set_wiphy_dev(pwiphy, dvobj_to_dev(dvobj));" not in source:
-              import re
-              pattern = re.compile(
-                  r"(pwiphy\s*=\s*rtw_wiphy_alloc\([^;]+;)"
-              )
-              source, count = pattern.subn(
-                  r"\1\n#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))\n"
-                  r"\t\tset_wiphy_dev(pwiphy, dvobj_to_dev(dvobj));\n#endif",
-                  source,
-                  count=1,
-              )
-              if count != 1:
-                  raise SystemExit("os_intfs.c: could not locate unique rtw_wiphy_alloc assignment")
+          marker = "struct wiphy *rtw_wiphy_alloc(_adapter *padapter, struct device *dev)\n{"
+          start = source.find(marker)
+          if start < 0:
+              raise SystemExit("ioctl_cfg80211.c: rtw_wiphy_alloc definition not found")
+          end = source.find("\n}", start)
+          if end < 0:
+              raise SystemExit("ioctl_cfg80211.c: end of rtw_wiphy_alloc not found")
+          block = source[start:end]
+          if "set_wiphy_dev(wiphy, dev);" not in block:
+              anchor = "\twiphy = wiphy_new("
+              if anchor not in block:
+                  raise SystemExit("rtw_wiphy_alloc: wiphy_new allocation not found")
+              block = block.replace(anchor, anchor, 1)
+              alloc_end = block.find(";", block.find(anchor))
+              if alloc_end < 0:
+                  raise SystemExit("rtw_wiphy_alloc: wiphy_new statement end not found")
+              block = (block[:alloc_end + 1] +
+                       "\n#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))\n"
+                       "\tset_wiphy_dev(wiphy, dev);\n#endif" +
+                       block[alloc_end + 1:])
+              source = source[:start] + block + source[end:]
               p.write_text(source)
           else:
-              print("os_intfs.c: set_wiphy_dev already present; skipping")
+              print("rtw_wiphy_alloc: set_wiphy_dev already present; skipping")
 
-          # cfg80211 netdev registration on Linux 6.x must retain dynamic naming.
+          # Preserve the upstream rtnl-lock decision: register_netdev() when the
+          # caller may acquire RTNL, register_netdevice() when RTNL is already held.
           p = Path("os_dep/linux/os_intfs.c")
           source = p.read_text()
-          if "res = register_netdev(pnetdev);" in source:
-              print("os_intfs.c: register_netdev(pnetdev) already uses dynamic naming")
-          elif "res = register_netdevice(pnetdev);" in source:
-              source = source.replace("res = register_netdevice(pnetdev);",
-                                      "res = register_netdev(pnetdev);", 1)
-              p.write_text(source)
-          else:
-              print("os_intfs.c: no legacy netdevice registration call matched; leaving unchanged")
+          if "register_netdev(ndev)" not in source or "register_netdevice(ndev)" not in source:
+              raise SystemExit("os_intfs.c: expected RTNL-aware netdev registration paths not found; refusing to alter")
+          print("os_intfs.c: upstream RTNL-aware netdev registration retained")
 
           # Linux 6.6 removed the legacy association/disassociation helpers.
           # Replace the existing compatibility macro in-place, keeping exactly
