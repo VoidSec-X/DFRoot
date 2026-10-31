@@ -51,6 +51,19 @@ jobs:
           make -C "$KDIR" M="$PWD" clean
           find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
 
+          # Clang 18+ treats the legacy zero-length IE payload as a bounds error.
+          # Convert only the information-element payload to a C flexible array.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("include/ieee80211.h")
+          s = p.read_text()
+          old = "struct ieee80211_info_element {\\n\\tu8 id;\\n\\tu8 len;\\n\\tu8 data[0];\\n};"
+          new = "struct ieee80211_info_element {\\n\\tu8 id;\\n\\tu8 len;\\n\\tu8 data[];\\n};"
+          if old not in s:
+              raise SystemExit("Expected ieee80211_info_element definition was not found; refusing an ambiguous patch")
+          p.write_text(s.replace(old, new, 1))
+          PY
+
           make -C "$KDIR" M="$PWD" \
             ARCH=arm64 \
             LLVM=1 \
