@@ -388,6 +388,36 @@ jobs:
           """
           p.write_text(source)
 
+          # The other ndo_start_xmit implementations are indirect-call targets too.
+          # Their return type must match netdev_tx_t, not merely be integer-compatible.
+          for path, old_sig, new_sig in (
+              ("os_dep/linux/ioctl_cfg80211.c",
+               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)",
+               "static netdev_tx_t rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
+              ("os_dep/linux/mlme_linux.c",
+               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)",
+               "static netdev_tx_t mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
+          ):
+              p = Path(path)
+              source = p.read_text()
+              if source.count(old_sig) == 1:
+                  source = source.replace(old_sig, new_sig, 1)
+              elif source.count(new_sig) != 1:
+                  raise SystemExit(f"{path}: expected exactly one ndo_start_xmit callback signature")
+              p.write_text(source)
+
+          # Compile-time ABI guard: fail the build if the exported callback's
+          # canonical function-pointer type differs from net_device_ops.
+          p = Path("os_dep/linux/xmit_linux.c")
+          source = p.read_text()
+          anchor = "netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)\n{\n\\treturn (netdev_tx_t)rtw_xmit_entry_legacy((_pkt *)skb, (_nic_hdl)dev);\n}"
+          assertion = anchor + "\n\n_Static_assert(__same_type(&rtw_xmit_entry, ((struct net_device_ops *)0)->ndo_start_xmit),\\n               \"rtw_xmit_entry must exactly match ndo_start_xmit ABI\");"
+          if source.count(anchor) == 1 and "_Static_assert(__same_type(&rtw_xmit_entry" not in source:
+              source = source.replace(anchor, assertion, 1)
+          elif "_Static_assert(__same_type(&rtw_xmit_entry" not in source:
+              raise SystemExit("xmit_linux.c: cannot place ndo_start_xmit ABI static assertion")
+          p.write_text(source)
+
           PY
 
           # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
@@ -408,43 +438,21 @@ jobs:
           install -m 0644 "$ANDROID_CFG" "$KDIR/include/net/cfg80211.h"
           test -s "$KDIR/include/net/cfg80211.h"
 
-          # Test the alternate cfg80211_ops layout with CONFIG_NL80211_TESTMODE enabled.
-          # Remove any generated define first; KCFLAGS below explicitly enables
-          # the two testmode callback slots for this driver build.
-          KCONFIG_AUTO="$KDIR/include/generated/autoconf.h"
-          if [ -f "$KCONFIG_AUTO" ]; then
-            sed -i '/^#define CONFIG_NL80211_TESTMODE\b/d' "$KCONFIG_AUTO"
-            if grep -q '^#define CONFIG_NL80211_TESTMODE\b' "$KCONFIG_AUTO"; then
-              echo "::error::CONFIG_NL80211_TESTMODE remains enabled in generated autoconf.h"
-              exit 1
-            fi
-          else
-            echo "::error::Missing $KCONFIG_AUTO; cannot enforce device cfg80211 layout"
-            exit 1
-          fi
-          echo "Driver cfg80211 layout: CONFIG_NL80211_TESTMODE=y (alternate ABI test)"
-          grep -n 'CONFIG_NL80211_TESTMODE' "$KCONFIG_AUTO" || true
-
+          # Build only the requested testmode-y variant. Do not manufacture a
+          # second cfg80211_ops layout by editing generated kernel config: that
+          # can make the module's view of cfg80211_ops differ from the running kernel.
+          # The DDK config is the authoritative layout for this build.
           mkdir -p "$GITHUB_WORKSPACE/out"
-
-          # Build both possible cfg80211_ops layouts. The supplied config has
-          # CFG80211 unset although the device loads a vendor cfg80211 module,
-          # so it cannot identify that module's TESTMODE layout.
-          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
-            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
-            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-UCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
-          test -s 8188eu.ko
-          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-n.ko"
-          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
-
-          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
-            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
-            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \\
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \\
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \\
             KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
-          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
-          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
+          llvm-readelf -h 8188eu.ko | grep -q 'AArch64'
+          llvm-readelf -p .modinfo 8188eu.ko | grep -q 'vermagic=6.6.127-4k'
+          llvm-nm -n 8188eu.ko | grep -q 'rtw_xmit_entry'
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          sha256sum "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
 
       - name: Upload RTL8188EUS.ko
@@ -455,67 +463,3 @@ jobs:
           path: out/8188eu-${{ matrix.kmi }}*.ko
           if-no-files-found: error
 
-  build-dfroot:
-    needs: build-lkms
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Validate signing config
-        if: github.event_name != 'pull_request'
-        run: |
-          if [ "${{ secrets.KEYSTORE }}" = "" ]; then
-            echo "::error::Signing secrets not configured. KEYSTORE secret is required for release builds."
-            exit 1
-          fi
-
-      - name: Create signing.properties
-        if: github.event_name != 'pull_request'
-        run: |
-          echo KEYSTORE_FILE=../keystore.jks > signing.properties
-          echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} >> signing.properties
-          echo KEY_ALIAS=${{ secrets.KEY_ALIAS }} >> signing.properties
-          echo KEY_PASSWORD=${{ secrets.KEY_PASSWORD }} >> signing.properties
-          echo ${{ secrets.KEYSTORE }} | base64 --decode > keystore.jks
-
-      - name: Download DF LKMs
-        uses: actions/download-artifact@v7
-        with:
-          pattern: df-lkm-*
-          merge-multiple: true
-          path: app/src/main/jni/ko/
-
-      - name: Download RTL8188EUS module
-        uses: actions/download-artifact@v7
-        with:
-          name: rtl8188eus-android15-6.6
-          path: app/src/main/jni/ko/
-
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - uses: gradle/actions/setup-gradle@v6
-
-      - name: Build DFRoot APK
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew :app:assembleDebug
-          else
-            ./gradlew :app:assembleRelease
-          fi
-
-      - name: Upload DFRoot APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: DFRoot
-          path: |
-            app/build/outputs/apk/release/DFRoot_*.apk
-            app/build/outputs/apk/debug/DFRoot_*.apk
-
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: app/build/outputs/apk/release/DFRoot_*.apk
