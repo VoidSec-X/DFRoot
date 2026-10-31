@@ -51,22 +51,37 @@ jobs:
           make -C "$KDIR" M="$PWD" clean
           find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
 
-          # Replace the legacy zero-length payload only in ieee80211_info_element.
+          # Convert the information-element payload to a standard C flexible array.
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           path = Path("include/ieee80211.h")
-          source = path.read_text()
-          pattern = r"(struct\s+ieee80211_info_element\s*\{\s*u8\s+id\s*;\s*u8\s+len\s*;\s*)u8\s+data\s*\[\s*0\s*\]\s*;"
-          patched, count = re.subn(pattern, r"\1u8 data[];", source, count=1)
-          if count != 1:
-              raise SystemExit("Could not uniquely patch ieee80211_info_element.data[0]")
-          path.write_text(patched)
+          lines = path.read_text().splitlines()
+          starts = [i for i, line in enumerate(lines) if "struct ieee80211_info_element" in line]
+          if len(starts) != 1:
+              raise SystemExit(f"Expected one ieee80211_info_element declaration, found {len(starts)}")
 
-          check = path.read_text()
-          if not re.search(r"struct\s+ieee80211_info_element\s*\{[^}]*u8\s+data\s*\[\s*\]", check, re.S):
+          start = starts[0]
+          end = next((i for i in range(start, len(lines)) if lines[i].strip() == "};"), None)
+          if end is None:
+              raise SystemExit("Could not find end of ieee80211_info_element declaration")
+
+          body = lines[start:end + 1]
+          data_lines = [i for i, line in enumerate(body) if "data[0]" in line]
+          if len(data_lines) != 1:
+              raise SystemExit(f"Expected one data[0] inside ieee80211_info_element, found {len(data_lines)}")
+
+          idx = start + data_lines[0]
+          lines[idx] = lines[idx].replace("data[0]", "data[]", 1)
+          path.write_text("\n".join(lines) + "\n")
+
+          verify = path.read_text().splitlines()
+          start = next(i for i, line in enumerate(verify) if "struct ieee80211_info_element" in line)
+          end = next(i for i in range(start, len(verify)) if verify[i].strip() == "};")
+          block = "\n".join(verify[start:end + 1])
+          if "data[]" not in block or "data[0]" in block:
               raise SystemExit("Flexible-array verification failed")
+          print("Patched ieee80211_info_element.data[] successfully")
           PY
 
           make -C "$KDIR" M="$PWD" \
