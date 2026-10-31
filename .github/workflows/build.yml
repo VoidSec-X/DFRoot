@@ -528,6 +528,42 @@ jobs:
                   raise SystemExit("hal_usb.c: legacy recv tasklet_init callback not found")
           p.write_text(source)
 
+          # Harden monitor-mode radiotap and 802.11 frame parsing before any
+          # skb_pull() or header dereference. A short/malformed userspace frame
+          # must be dropped, not allowed to underflow skb length or read past data.
+          p = Path("os_dep/linux/ioctl_cfg80211.c")
+          source = p.read_text()
+          old = """\tif (unlikely(skb->len < rtap_len))
+          \t\tgoto fail;
+
+          \t/* Skip the ratio tap header */
+          \tskb_pull(skb, rtap_len);
+
+          \tdot11_hdr = (struct rtw_ieee80211_hdr *)skb->data;"""
+          new = """\tif (unlikely(rtap_len < sizeof(*rtap_hdr) || skb->len < rtap_len))
+          \t\tgoto fail;
+
+          \t/* Skip the radiotap header only after validating its full length. */
+          \tskb_pull(skb, rtap_len);
+          \tif (unlikely(skb->len < sizeof(*dot11_hdr)))
+          \t\tgoto fail;
+
+          \tdot11_hdr = (struct rtw_ieee80211_hdr *)skb->data;"""
+          if source.count(old) != 1:
+              raise SystemExit("monitor xmit: radiotap/header validation anchor not found exactly once")
+          source = source.replace(old, new, 1)
+
+          old = """\t\tskb_pull(skb, dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2);
+          \t\tpdata = (unsigned char *)skb->data;"""
+          new = """\t\tif (unlikely(skb->len < dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2))
+          \t\t\tgoto fail;
+          \t\tskb_pull(skb, dot11_hdr_len + qos_len + snap_len - sizeof(src_mac_addr) * 2);
+          \t\tpdata = (unsigned char *)skb->data;"""
+          if source.count(old) != 1:
+              raise SystemExit("monitor xmit: data-frame skb_pull validation anchor not found exactly once")
+          source = source.replace(old, new, 1)
+          p.write_text(source)
+
           PY
 
           # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
