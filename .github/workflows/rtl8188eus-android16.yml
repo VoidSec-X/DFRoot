@@ -51,8 +51,7 @@ jobs:
           make -C "$KDIR" M="$PWD" clean
           find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.cmd' \) -delete
 
-          # Android 16 Clang compatibility: turn legacy trailing arrays into
-          # C flexible array members and annotate the affected switch label.
+          # Android 16 Clang compatibility fixes.
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -60,51 +59,47 @@ jobs:
           def patch_struct(path, struct_start, struct_end, field_pattern, replacement):
               p = Path(path)
               s = p.read_text()
-              start = s.find(struct_start)
-              if start < 0:
-                  raise SystemExit(f"{path}: struct start not found")
-              end = s.find(struct_end, start)
-              if end < 0:
-                  raise SystemExit(f"{path}: struct end not found")
+              start = s.index(struct_start)
+              end = s.index(struct_end, start)
               block = s[start:end]
-              block2, n = re.subn(field_pattern, replacement, block, count=1)
+              patched, n = re.subn(field_pattern, replacement, block, count=1)
               if n != 1:
-                  raise SystemExit(f"{path}: trailing-array field match count={n}")
-              p.write_text(s[:start] + block2 + s[end:])
+                  raise SystemExit(f"{path}: expected one trailing array, got {n}")
+              p.write_text(s[:start] + patched + s[end:])
 
           patch_struct(
               "include/ieee80211.h",
               "struct ieee80211_info_element {",
               "} __attribute__((packed));",
-              r"u8\\s+data\\[0\\]\\s*;",
+              r"u8\s+data\[0\]\s*;",
               "u8 data[];"
           )
           patch_struct(
               "include/wlan_bssdef.h",
               "typedef struct _NDIS_802_11_VARIABLE_IEs {",
               "} NDIS_802_11_VARIABLE_IEs, *PNDIS_802_11_VARIABLE_IEs;",
-              r"u8\\s+data\\[1\\]\\s*;",
+              r"u8\s+data\[1\]\s*;",
               "u8  data[];"
           )
 
           p = Path("core/rtw_wlan_util.c")
           s = p.read_text()
           start = s.index("void update_beacon_info(")
-          end = s.index("\\n#ifdef CONFIG_DFS", start)
+          end = s.index("\n#ifdef CONFIG_DFS", start)
           fn = s[start:end]
-          # Clang's diagnostic points to the default labels. A case label
-          # immediately before default prevents the implicit fall-through
-          # when optional switch labels are preprocessed out.
-          marker = re.compile(r"(?m)^(\\s*)default:")
-          fn2, n = marker.subn(lambda m: f"{m.group(1)}case 0xff:\\n{m.group(1)}\\tbreak;\\n{m.group(1)}default:", fn, count=1)
+          default_re = re.compile(r"(?m)^(\s*)default:")
+          patched, n = default_re.subn(
+              lambda m: m.group(1) + "case 0xff:\n" +
+                        m.group(1) + "\tbreak;\n" +
+                        m.group(1) + "default:",
+              fn, count=1
+          )
           if n != 1:
-              raise SystemExit(f"update_beacon_info default label match count={n}")
-          p.write_text(s[:start] + fn2 + s[end:])
+              raise SystemExit(f"update_beacon_info default count={n}")
+          p.write_text(s[:start] + patched + s[end:])
           PY
-          # Ensure the edits landed in the intended declarations.
           grep -A4 -F 'struct ieee80211_info_element {' include/ieee80211.h
           grep -A4 -F 'typedef struct _NDIS_802_11_VARIABLE_IEs {' include/wlan_bssdef.h
-
 
           make -C "$KDIR" M="$PWD" \
             ARCH=arm64 \
