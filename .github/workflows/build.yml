@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, fix/rtl8188eus-kcfi-abi-android15-66]
     tags: ['v*']
   pull_request:
     branches: [master, main]
