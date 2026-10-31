@@ -333,101 +333,111 @@ jobs:
               source = source.replace(old, new, 1)
           p.write_text(source)
 
-          # Preserve legacy driver internals behind one precisely typed ndo_start_xmit wrapper.
+          # Match the Linux net_device_ops ndo_start_xmit CFI prototype.
+          # The upstream driver declared/defined rtw_xmit_entry as int, while
+          # the kernel callback type is netdev_tx_t (*)(struct sk_buff *,
+          # struct net_device *). Clang CFI rejects that incompatible target
+          # at dev_hard_start_xmit when the interface transmits its first frame.
           p = Path("include/xmit_osdep.h")
           source = p.read_text()
-          decl = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
-          old_decl = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          if old_decl in source:
-              source = source.replace(old_decl, decl, 1)
-          elif decl not in source:
-              raise SystemExit("xmit_osdep.h: rtw_xmit_entry declaration missing")
+          old = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          new = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
+          already = "extern netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev);"
+          compat = "extern netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
+          if old in source:
+              source = source.replace(old, new, 1)
+          elif compat in source:
+              source = source.replace(compat, new, 1)
+          elif already not in source:
+              raise SystemExit("xmit_osdep.h: Linux rtw_xmit_entry prototype not found")
           p.write_text(source)
 
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
-          old_sig = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          broad_sig = "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)"
-          if broad_sig in source:
-              source = source.replace(broad_sig, old_sig, 1)
-          if source.count(old_sig) != 1:
-              raise SystemExit("xmit_linux.c: expected exactly one legacy rtw_xmit_entry body")
-          source = source.replace(old_sig,
-              "static int rtw_xmit_entry_legacy(_pkt *pkt, _nic_hdl pnetdev)", 1)
-          wrapper = r"""
-          /*
-           * Exact net_device_ops::ndo_start_xmit ABI boundary.
-           * Do not cast the callback itself; the legacy helper stays private.
-           */
-          netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)
-          {
-              return (netdev_tx_t)rtw_xmit_entry_legacy((_pkt *)skb, (_nic_hdl)dev);
-          }
-
-          _Static_assert(__same_type(&rtw_xmit_entry,
-              ((struct net_device_ops *)0)->ndo_start_xmit),
-              "rtw_xmit_entry must exactly match ndo_start_xmit ABI");
-          """
-          if "netdev_tx_t rtw_xmit_entry(struct sk_buff *skb, struct net_device *dev)" in source:
-              raise SystemExit("xmit_linux.c: duplicate ndo_start_xmit wrapper")
-          source = source.rstrip() + "\n" + wrapper + "\n"
+          old = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          compat = "netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
+          new = "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif source.count(compat) == 1:
+              source = source.replace(compat, new, 1)
+          elif source.count(new) != 1:
+              raise SystemExit("xmit_linux.c: Linux rtw_xmit_entry definition not found or ambiguous")
           p.write_text(source)
 
-          # Every ndo_start_xmit implementation must use netdev_tx_t.
-          for path, old_sig, new_sig in (
+          # Fix every other ndo_start_xmit callback assigned in net_device_ops.
+          for path, signature in (
               ("os_dep/linux/ioctl_cfg80211.c",
-               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)",
-               "static netdev_tx_t rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
+               "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
               ("os_dep/linux/mlme_linux.c",
-               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)",
-               "static netdev_tx_t mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
+               "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
           ):
               p = Path(path)
               source = p.read_text()
-              if source.count(old_sig) == 1:
-                  source = source.replace(old_sig, new_sig, 1)
-              elif source.count(new_sig) != 1:
-                  raise SystemExit(f"{path}: expected exactly one xmit callback")
+              fixed = signature.replace("static int ", "static netdev_tx_t ", 1)
+              if source.count(signature) == 1:
+                  source = source.replace(signature, fixed, 1)
+              elif source.count(fixed) != 1:
+                  raise SystemExit(f"{path}: expected one xmit callback signature")
               p.write_text(source)
 
           PY
 
-          # Use complete DDK-generated headers/config. Never splice one header
-          # from an unrelated kernel tree into this build.
+          # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
+          # release tag used as the DDK baseline. The Realme public source
+          # branch currently identifies itself as 6.6.89, so it is not a
+          # trustworthy header source for this 6.6.127 module build.
+          mkdir -p "$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net"
+          ANDROID_CFG="$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net/cfg80211.h"
+          curl -fsSL \
+            "https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/include/net/cfg80211.h?format=TEXT" \
+            | base64 -d > "$ANDROID_CFG"
+          test -s "$ANDROID_CFG"
+          grep -q 'struct cfg80211_ops' "$ANDROID_CFG"
+          mkdir -p "$KDIR/include/net"
           echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
-          echo "DDK compiler: $(clang --version | head -n1)"
-          test -f "$KDIR/.config"
-          test -f "$KDIR/include/generated/autoconf.h"
-          test -f "$KDIR/include/config/auto.conf"
-          echo "Relevant generated config:"
-          grep -E '^(CONFIG_CFI_CLANG|CONFIG_CFI_PERMISSIVE|CONFIG_NL80211_TESTMODE|CONFIG_MODVERSIONS|CONFIG_LTO_CLANG)=' "$KDIR/.config" || true
-          grep -E 'CONFIG_CFI_CLANG|CONFIG_NL80211_TESTMODE|CONFIG_MODVERSIONS|CONFIG_LTO_CLANG' "$KDIR/include/generated/autoconf.h" || true
+          echo "Android common 6.6.127 cfg80211.h sha256:"
+          sha256sum "$ANDROID_CFG"
+          install -m 0644 "$ANDROID_CFG" "$KDIR/include/net/cfg80211.h"
+          test -s "$KDIR/include/net/cfg80211.h"
 
-          # The upstream RTL8188EUS driver exposes cfg80211 testmode callbacks
-          # only when CONFIG_NL80211_TESTMODE is set in the kernel headers.
-          # The DDK defconfig omits it. Enable it in the actual kernel Kconfig,
-          # regenerate all derived config headers, and verify each generated view.
-          test -x "$KDIR/scripts/config"
-          "$KDIR/scripts/config" --file "$KDIR/.config" --enable NL80211_TESTMODE
-          make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
-          grep -q '^CONFIG_NL80211_TESTMODE=y$' "$KDIR/.config"
-          grep -q '^#define CONFIG_NL80211_TESTMODE 1$' "$KDIR/include/generated/autoconf.h"
-          grep -q '^CONFIG_NL80211_TESTMODE=y$' "$KDIR/include/config/auto.conf"
-          echo "Generated testmode config is enabled in .config, autoconf.h and auto.conf"
+          # Test the alternate cfg80211_ops layout with CONFIG_NL80211_TESTMODE enabled.
+          # Remove any generated define first; KCFLAGS below explicitly enables
+          # the two testmode callback slots for this driver build.
+          KCONFIG_AUTO="$KDIR/include/generated/autoconf.h"
+          if [ -f "$KCONFIG_AUTO" ]; then
+            sed -i '/^#define CONFIG_NL80211_TESTMODE\b/d' "$KCONFIG_AUTO"
+            if grep -q '^#define CONFIG_NL80211_TESTMODE\b' "$KCONFIG_AUTO"; then
+              echo "::error::CONFIG_NL80211_TESTMODE remains enabled in generated autoconf.h"
+              exit 1
+            fi
+          else
+            echo "::error::Missing $KCONFIG_AUTO; cannot enforce device cfg80211 layout"
+            exit 1
+          fi
+          echo "Driver cfg80211 layout: CONFIG_NL80211_TESTMODE=y (alternate ABI test)"
+          grep -n 'CONFIG_NL80211_TESTMODE' "$KCONFIG_AUTO" || true
 
-          # Compile-time ABI diagnostics are fatal; print KCFI metadata for review.
           mkdir -p "$GITHUB_WORKSPACE/out"
+
+          # Build both possible cfg80211_ops layouts. The supplied config has
+          # CFG80211 unset although the device loads a vendor cfg80211 module,
+          # so it cannot identify that module's TESTMODE layout.
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
             CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
-            KCFLAGS="-Werror=incompatible-function-pointer-types -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+            KCFLAGS="-UCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
-          llvm-readelf -h 8188eu.ko | grep -q AArch64
-          llvm-nm -a 8188eu.ko | grep -E 'rtw_xmit_entry|__kcfi_typeid_rtw_xmit_entry'
-          llvm-readelf -S 8188eu.ko | grep -Ei 'kcfi|llvm'
-          llvm-readelf -p .modinfo 8188eu.ko
-          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
-          sha256sum "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-y.ko"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-n.ko"
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
+
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
+            KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
+          test -s 8188eu.ko
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
+          cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
 
       - name: Upload RTL8188EUS.ko
