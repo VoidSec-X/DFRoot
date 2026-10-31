@@ -349,9 +349,11 @@ jobs:
           source = p.read_text()
           old = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
           new = "extern netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          if source.count(old) != 1:
-              raise SystemExit("xmit_osdep.h: expected one Linux rtw_xmit_entry prototype")
-          p.write_text(source.replace(old, new, 1))
+          if old in source:
+              source = source.replace(old, new, 1)
+          elif new not in source:
+              raise SystemExit("xmit_osdep.h: Linux rtw_xmit_entry prototype not found")
+          p.write_text(source)
 
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
