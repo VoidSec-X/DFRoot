@@ -428,6 +428,47 @@ jobs:
               raise SystemExit("usb_ops_linux.c: TX tasklet adapter conversion not found")
           p.write_text(source)
 
+          # Match the USB RX tasklet callback to the same legacy tasklet_init
+          # ABI. Build #110 had this fix; it was lost in the later baseline.
+          # Interface bring-up schedules the RX tasklet, so a mismatched KCFI
+          # type here can reboot before any packet transmission occurs.
+          p = Path("include/usb_ops_linux.h")
+          source = p.read_text()
+          import re
+          source, count = re.subn(
+              r"void\\s+usb_recv_tasklet\\s*\\(\\s*[^;]+\\s*\\)\\s*;",
+              "void usb_recv_tasklet(unsigned long priv);",
+              source, count=1)
+          if count != 1:
+              raise SystemExit("usb_ops_linux.h: RX tasklet prototype not found exactly once")
+          p.write_text(source)
+
+          p = Path("os_dep/linux/usb_ops_linux.c")
+          source = p.read_text()
+          source, count = re.subn(
+              r"void\\s+usb_recv_tasklet\\s*\\(\\s*[^)]*\\)",
+              "void usb_recv_tasklet(unsigned long priv)",
+              source)
+          if count != 2:
+              raise SystemExit(f"os_dep/linux/usb_ops_linux.c: expected 2 RX tasklet definitions, changed {count}")
+          source, count = re.subn(
+              r"_adapter\\s*\\*\\s*padapter\\s*=\\s*\\(_adapter\\s*\\*\\)\\s*priv\\s*;",
+              "_adapter *padapter = (_adapter *)(uintptr_t)priv;",
+              source, count=2)
+          if count != 2:
+              raise SystemExit(f"os_dep/linux/usb_ops_linux.c: expected 2 RX adapter conversions, changed {count}")
+          p.write_text(source)
+
+          p = Path("hal/hal_hci/hal_usb.c")
+          source = p.read_text()
+          old = "(void(*)(unsigned long))usb_recv_tasklet"
+          new = "usb_recv_tasklet"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif source.count(new) != 1:
+              raise SystemExit("hal_usb.c: RX tasklet_init callback not found or ambiguous")
+          p.write_text(source)
+
           PY
 
           # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
