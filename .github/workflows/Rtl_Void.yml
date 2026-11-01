@@ -360,6 +360,36 @@ jobs:
           if source.count(old) != 2:
               raise SystemExit(f"os_intfs.c: expected two legacy ndo_start_xmit assignments, found {source.count(old)}")
           p.write_text(source.replace(old, new))
+          # Audit every netdev_ops initializer in the complete upstream driver tree.
+          # The crash log showed an active device still calling the legacy
+          # int-returning rtw_xmit_entry directly, despite the typed wrapper above.
+          # Redirect every remaining ndo_start_xmit assignment to the KCFI-correct
+          # enum netdev_tx wrapper, including virtual/monitor helper netdevs.
+          replaced = 0
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or path.suffix not in (".c", ".h", ".cc", ".cpp"):
+                  continue
+              try:
+                  source = path.read_text()
+              except (UnicodeDecodeError, OSError):
+                  continue
+              updated, count = re.subn(
+                  r"(\\bndo_start_xmit\\s*=\\s*)&?\\s*rtw_xmit_entry\\b",
+                  r"\\1rtl8188eu_ndo_start_xmit",
+                  source)
+              if count:
+                  path.write_text(updated)
+                  replaced += count
+          print(f"DFROOT: redirected {replaced} additional legacy TX callback(s)")
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or path.suffix not in (".c", ".h", ".cc", ".cpp"):
+                  continue
+              try:
+                  source = path.read_text()
+              except (UnicodeDecodeError, OSError):
+                  continue
+              if re.search(r"\\bndo_start_xmit\\s*=\\s*&?\\s*rtw_xmit_entry\\b", source):
+                  raise SystemExit(f"{path}: legacy rtw_xmit_entry remains assigned to ndo_start_xmit")
           # The monitor and hostapd management interfaces have their own
           # ndo_start_xmit callbacks; make their return type the exact enum too.
           for path, old, new in (
