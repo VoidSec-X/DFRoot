@@ -438,6 +438,35 @@ jobs:
               if not direct:
                   raise SystemExit("hal_usb.c: legacy recv tasklet_init callback not found")
           p.write_text(source)
+          # The USB TX tasklet had the same legacy ABI bug as the RX tasklet:
+          # its real callback was void(void *), but tasklet_init calls it as
+          # void(unsigned long). KCFI therefore rejects rtl8188eu_xmit_tasklet
+          # from tasklet_action_common (the exact reboot in console-ramoops).
+          p = Path("include/rtl8188e_xmit.h")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv);"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv);"
+          if source.count(old) != 1:
+              raise SystemExit("rtl8188e_xmit.h: expected one USB TX tasklet prototype")
+          p.write_text(source.replace(old, new, 1))
+          p = Path("hal/rtl8188e/usb/usb_ops_linux.c")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv)"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv)"
+          if source.count(old) != 1:
+              raise SystemExit("usb_ops_linux.c: expected one USB TX tasklet definition")
+          source = source.replace(old, new, 1)
+          old = "_adapter *padapter = (_adapter *)priv;"
+          new = "_adapter *padapter = (_adapter *)(uintptr_t)priv;"
+          if source.count(old) != 1:
+              raise SystemExit("usb_ops_linux.c: TX tasklet adapter conversion not found")
+          p.write_text(source.replace(old, new, 1))
+          p = Path("hal/rtl8188e/usb/rtl8188eu_xmit.c")
+          source = p.read_text()
+          old = "(void(*)(unsigned long))rtl8188eu_xmit_tasklet"
+          if source.count(old) != 1:
+              raise SystemExit("rtl8188eu_xmit.c: expected one casted TX tasklet registration")
+          p.write_text(source.replace(old, "rtl8188eu_xmit_tasklet", 1))
           # Harden the radiotap/802.11 injection TX path against truncated or
           # non-linear SKBs before dereferencing headers or pulling payload bytes.
           p = Path("os_dep/linux/ioctl_cfg80211.c")
@@ -617,6 +646,12 @@ jobs:
             exit 1
           fi
           echo "Verified usb_recv_tasklet KCFI type ID: $TASKLET_KCFI_ID"
+          XMIT_TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtl8188eu_xmit_tasklet" {print $2}')
+          if [ "$XMIT_TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
+            echo "::error::rtl8188eu_xmit_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${XMIT_TASKLET_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified rtl8188eu_xmit_tasklet KCFI type ID: $XMIT_TASKLET_KCFI_ID"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-injection-fixed.ko"
           # The monitor callback is static; Clang may inline/omit its standalone KCFI
           # typeid symbol. The build itself plus the two exported callback ABI checks
