@@ -374,8 +374,8 @@ jobs:
               except (UnicodeDecodeError, OSError):
                   continue
               updated, count = re.subn(
-                  r"(\\bndo_start_xmit\\s*=\\s*)&?\\s*rtw_xmit_entry\\b",
-                  r"\\1rtl8188eu_ndo_start_xmit",
+                  r"(\bndo_start_xmit\s*=\s*)&?\s*rtw_xmit_entry\b",
+                  r"\1rtl8188eu_ndo_start_xmit",
                   source)
               if count:
                   path.write_text(updated)
