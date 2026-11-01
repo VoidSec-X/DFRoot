@@ -60,6 +60,7 @@ jobs:
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
           python3 - <<'PY'
           from pathlib import Path
+          import re
           def replace_once(path, old, new):
               p = Path(path)
               source = p.read_text()
@@ -582,6 +583,7 @@ jobs:
           llvm-readelf -sW 8188eu.ko | grep -q "__kcfi_typeid_rtw_cfg80211_monitor_if_xmit_entry"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
       - name: Upload injection-fixed RTL8188EUS module
+        if: matrix.kmi == 'android15-6.6'
         uses: actions/upload-artifact@v7
         with:
           name: rtl8188eus-android15-6.6-injection-fixed
