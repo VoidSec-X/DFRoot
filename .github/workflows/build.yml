@@ -479,6 +479,12 @@ jobs:
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
             KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
+          TX_TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtl8188eu_xmit_tasklet" {print $2}')
+          if [ "$TX_TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
+            echo "::error::rtl8188eu_xmit_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${TX_TASKLET_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified rtl8188eu_xmit_tasklet KCFI type ID: $TX_TASKLET_KCFI_ID"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
