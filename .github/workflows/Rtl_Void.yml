@@ -352,9 +352,11 @@ jobs:
           source = p.read_text()
           old = ".ndo_start_xmit = rtw_xmit_entry,"
           new = ".ndo_start_xmit = rtl8188eu_ndo_start_xmit,"
-          if source.count(old) != 2:
-              raise SystemExit(f"os_intfs.c: expected two legacy ndo_start_xmit assignments, found {source.count(old)}")
-          p.write_text(source.replace(old, new))
+          count = source.count(old)
+          if count != 2:
+              raise SystemExit(f"os_intfs.c: expected two legacy ndo_start_xmit assignments, found {count}")
+          source = source.replace(old, new)
+          p.write_text(source)
           # Audit every netdev_ops initializer in the complete upstream driver tree.
           # The crash log showed an active device still calling the legacy
           # int-returning rtw_xmit_entry directly, despite the typed wrapper above.
