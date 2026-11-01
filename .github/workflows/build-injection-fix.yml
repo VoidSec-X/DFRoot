@@ -1,6 +1,8 @@
 name: Build RTL8188EUS Injection Crash Fix
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
 
 jobs:
@@ -389,7 +391,7 @@ jobs:
                        "os_dep/linux/ioctl_cfg80211.c",
                        "os_dep/linux/mlme_linux.c"):
               source = Path(path).read_text()
-              if re.search(r"\\.ndo_start_xmit\\s*=\\s*(?!rtw_xmit_entry\\b|rtw_cfg80211_monitor_if_xmit_entry\\b|mgnt_xmit_entry\\b)[A-Za-z0-9_]+", source):
+              if re.search(r"\.ndo_start_xmit\s*=\s*(?!rtw_xmit_entry\b|rtw_cfg80211_monitor_if_xmit_entry\b|mgnt_xmit_entry\b)[A-Za-z0-9_]+", source):
                   raise SystemExit(f"{path}: unexpected ndo_start_xmit callback assignment")
           if "netdev_tx_t rtw_xmit_entry(struct sk_buff *pkt, struct net_device *pnetdev)" not in Path("os_dep/linux/xmit_linux.c").read_text():
               raise SystemExit("rtw_xmit_entry does not have the kernel ndo_start_xmit signature")
