@@ -408,10 +408,6 @@ jobs:
           \trtw_mstat_update(MSTAT_TYPE_SKB, MSTAT_ALLOC_SUCCESS, skb->truesize);"""
           new = """\tif (!skb)
           \t\treturn NETDEV_TX_OK;
-          \tif (!ndev) {
-          \t\trtw_skb_free(skb);
-          \t\treturn NETDEV_TX_OK;
-          \t}
           \tif (!pskb_may_pull(skb, sizeof(struct ieee80211_radiotap_header)))
           \t\tgoto fail;
 
@@ -482,7 +478,7 @@ jobs:
           \t\t/* The action-frame parser and management header reads need
           \t\t * a complete, linear three-address 802.11 header.
           \t\t */
-          \t\tif (unlikely(skb->len < 24) || !pskb_may_pull(skb, 24))
+          \t\tif (unlikely(skb->len < 24) || !pskb_may_pull(skb, skb->len))
           \t\t\tgoto fail;
           \t\t/* only for action frames */"""
           if source.count(old) != 1:
