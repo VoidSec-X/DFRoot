@@ -139,13 +139,13 @@ jobs:
           #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, bss, buf, len)
           #endif"""
           new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-          #define rtw_cfg80211_send_rx_assoc(adapter, arg_bss, arg_buf, arg_len) \\
-          do { \\
-              struct cfg80211_rx_assoc_resp assoc_resp = { \\
-                  .buf = (arg_buf), .len = (arg_len), .req_ies = NULL, .req_ies_len = 0, \\
-              }; \\
-              assoc_resp.links[0].bss = (arg_bss); \\
-              cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \\
+          #define rtw_cfg80211_send_rx_assoc(adapter, arg_bss, arg_buf, arg_len) \
+          do { \
+              struct cfg80211_rx_assoc_resp assoc_resp = { \
+                  .buf = (arg_buf), .len = (arg_len), .req_ies = NULL, .req_ies_len = 0, \
+              }; \
+              assoc_resp.links[0].bss = (arg_bss); \
+              cfg80211_rx_assoc_resp((adapter)->pnetdev, &assoc_resp); \
           } while (0)
           #elif (LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0)) && !defined(COMPAT_KERNEL_RELEASE)
           #define rtw_cfg80211_send_rx_assoc(adapter, bss, buf, len) cfg80211_send_rx_assoc((adapter)->pnetdev, buf, len)
@@ -277,8 +277,8 @@ jobs:
           # Match the Android common 6.6.127 cfg80211 declarations.
           mkdir -p "$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net"
           ANDROID_CFG="$GITHUB_WORKSPACE/kernel-headers/android15-6.6.127/include/net/cfg80211.h"
-          curl -fsSL \\
-            "https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/include/net/cfg80211.h?format=TEXT" \\
+          curl -fsSL \
+            "https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/include/net/cfg80211.h?format=TEXT" \
             | base64 -d > "$ANDROID_CFG"
           test -s "$ANDROID_CFG"
           grep -q 'struct cfg80211_ops' "$ANDROID_CFG"
@@ -294,17 +294,17 @@ jobs:
 
           COMMON_FLAGS="-DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211 -Werror=incompatible-function-pointer-types"
 
-          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \\
-            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \\
-            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \\
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
             KCFLAGS="-UCONFIG_NL80211_TESTMODE $COMMON_FLAGS" modules
           test -s 8188eu.ko
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-testmode-n.ko"
 
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
-          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \\
-            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \\
-            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \\
+          make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 \
+            CONFIG_RTL8188EU=m CONFIG_RTL8188E=y CONFIG_USB_HCI=y \
+            CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
             KCFLAGS="-DCONFIG_NL80211_TESTMODE $COMMON_FLAGS" modules
           test -s 8188eu.ko
 
