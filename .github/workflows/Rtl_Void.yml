@@ -354,7 +354,7 @@ jobs:
           source = p.read_text()
           updated, count = re.subn(
               r"(\bndo_start_xmit\s*=\s*)&?\s*rtw_xmit_entry\b",
-              r"\\1rtl8188eu_ndo_start_xmit",
+              r"\1rtl8188eu_ndo_start_xmit",
               source)
           if count != 2:
               raise SystemExit(f"os_intfs.c: expected exactly two legacy ndo_start_xmit assignments, found {count}")
