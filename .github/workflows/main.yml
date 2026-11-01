@@ -535,7 +535,7 @@ jobs:
                   text = path.read_text()
               except (UnicodeDecodeError, OSError):
                   continue
-              updated, count = re.subn(r"\\brtw_xmit_entry\\b",
+              updated, count = re.subn(r"\brtw_xmit_entry\b",
                                        "rtw_xmit_entry_legacy", text)
               if count:
                   path.write_text(updated)
@@ -549,12 +549,12 @@ jobs:
                   text = path.read_text()
               except (UnicodeDecodeError, OSError):
                   continue
-              if re.search(r"\\brtw_xmit_entry\\b", text):
+              if re.search(r"\brtw_xmit_entry\b", text):
                   raise SystemExit(f"{path}: unrenamed legacy TX symbol remains")
           legacy_defs = []
           for path in Path(".").rglob("*.c"):
               text = path.read_text(errors="ignore")
-              if re.search(r"\\bint\\s+rtw_xmit_entry_legacy\\s*\\(", text):
+              if re.search(r"\bint\s+rtw_xmit_entry_legacy\s*\(", text):
                   legacy_defs.append(str(path))
           if len(legacy_defs) != 1:
               raise SystemExit(f"TX helper rename audit: expected one legacy definition, found {legacy_defs}")
