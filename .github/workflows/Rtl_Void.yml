@@ -347,22 +347,18 @@ jobs:
           if "rtl8188eu_ndo_start_xmit(" not in source:
               source = source.rstrip() + "\n\n" + wrapper + "\n"
           p.write_text(source)
-          # Both physical and virtual station interfaces use the typed callback.
+          # Rewrite any remaining netdev_ops initializer before saving os_intfs.c.
+          # Keep a final audit so the legacy int-returning callback cannot remain
+          # attached to ndo_start_xmit and trigger the observed KCFI failure.
           p = Path("os_dep/linux/os_intfs.c")
           source = p.read_text()
-          old = ".ndo_start_xmit = rtw_xmit_entry,"
-          new = ".ndo_start_xmit = rtl8188eu_ndo_start_xmit,"
-          count = source.count(old)
+          updated, count = re.subn(
+              r"(\\bndo_start_xmit\\s*=\\s*)&?\\s*rtw_xmit_entry\\b",
+              r"\\1rtl8188eu_ndo_start_xmit",
+              source)
           if count != 2:
-              raise SystemExit(f"os_intfs.c: expected two legacy ndo_start_xmit assignments, found {count}")
-          source = source.replace(old, new)
-          p.write_text(source)
-          # Audit every netdev_ops initializer in the complete upstream driver tree.
-          # The crash log showed an active device still calling the legacy
-          # int-returning rtw_xmit_entry directly, despite the typed wrapper above.
-          # Redirect every remaining ndo_start_xmit assignment to the KCFI-correct
-          # enum netdev_tx wrapper, including virtual/monitor helper netdevs.
-          replaced = 0
+              raise SystemExit(f"os_intfs.c: expected exactly two legacy ndo_start_xmit assignments, found {count}")
+          p.write_text(updated)
           for path in Path(".").rglob("*"):
               if not path.is_file() or path.suffix not in (".c", ".h", ".cc", ".cpp"):
                   continue
@@ -370,22 +366,7 @@ jobs:
                   source = path.read_text()
               except (UnicodeDecodeError, OSError):
                   continue
-              updated, count = re.subn(
-                  r"(\bndo_start_xmit\s*=\s*)&?\s*rtw_xmit_entry\b",
-                  r"\1rtl8188eu_ndo_start_xmit",
-                  source)
-              if count:
-                  path.write_text(updated)
-                  replaced += count
-          print(f"DFROOT: redirected {replaced} additional legacy TX callback(s)")
-          for path in Path(".").rglob("*"):
-              if not path.is_file() or path.suffix not in (".c", ".h", ".cc", ".cpp"):
-                  continue
-              try:
-                  source = path.read_text()
-              except (UnicodeDecodeError, OSError):
-                  continue
-              if re.search(r"\bndo_start_xmit\s*=\s*&?\s*rtw_xmit_entry\b", source):
+              if re.search(r"\\bndo_start_xmit\\s*=\\s*&?\\s*rtw_xmit_entry\\b", source):
                   raise SystemExit(f"{path}: legacy rtw_xmit_entry remains assigned to ndo_start_xmit")
           # The monitor and hostapd management interfaces have their own
           # ndo_start_xmit callbacks; make their return type the exact enum too.
