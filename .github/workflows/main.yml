@@ -523,6 +523,42 @@ jobs:
               raise SystemExit("monitor TX: action-frame bounds anchor not found exactly once")
           source = source.replace(old, new, 1)
           p.write_text(source)
+          # Make the legacy helper impossible to install as a netdev callback.
+          # Rename every source-level reference after installing the typed wrapper.
+          # If any ndo_start_xmit initializer still points at the old name, the
+          # compile will now fail rather than silently producing a KCFI-bad module.
+          renamed = 0
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or path.suffix not in (".c", ".h", ".cc", ".cpp"):
+                  continue
+              try:
+                  text = path.read_text()
+              except (UnicodeDecodeError, OSError):
+                  continue
+              updated, count = re.subn(r"\\brtw_xmit_entry\\b",
+                                       "rtw_xmit_entry_legacy", text)
+              if count:
+                  path.write_text(updated)
+                  renamed += count
+          if renamed < 3:
+              raise SystemExit(f"TX helper rename audit: expected prototype, definition and wrapper call; renamed {renamed}")
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or path.suffix not in (".c", ".h", ".cc", ".cpp"):
+                  continue
+              try:
+                  text = path.read_text()
+              except (UnicodeDecodeError, OSError):
+                  continue
+              if re.search(r"\\brtw_xmit_entry\\b", text):
+                  raise SystemExit(f"{path}: unrenamed legacy TX symbol remains")
+          legacy_defs = []
+          for path in Path(".").rglob("*.c"):
+              text = path.read_text(errors="ignore")
+              if re.search(r"\\bint\\s+rtw_xmit_entry_legacy\\s*\\(", text):
+                  legacy_defs.append(str(path))
+          if len(legacy_defs) != 1:
+              raise SystemExit(f"TX helper rename audit: expected one legacy definition, found {legacy_defs}")
+          print(f"TX callback audit: renamed legacy helper references ({renamed}); typed ndo_start_xmit wrapper remains the only callback entry")
           PY
           # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
           # release tag used as the DDK baseline. The Realme public source
