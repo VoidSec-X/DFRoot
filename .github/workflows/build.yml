@@ -356,15 +356,11 @@ jobs:
 
           p = Path("hal/rtl8188e/usb/rtl8188eu_xmit.c")
           source = p.read_text()
-          old = """tasklet_init(&pxmitpriv->xmit_tasklet,
-                       (void(*)(unsigned long))rtl8188eu_xmit_tasklet,
-                       (unsigned long)padapter);"""
-          new = """tasklet_init(&pxmitpriv->xmit_tasklet,
-                       rtl8188eu_xmit_tasklet,
-                       (unsigned long)padapter);"""
+          old = "(void(*)(unsigned long))rtl8188eu_xmit_tasklet"
+          new = "rtl8188eu_xmit_tasklet"
           if source.count(old) == 1:
               source = source.replace(old, new, 1)
-          elif new not in source:
+          elif source.count(new) < 1:
               raise SystemExit("rtl8188eu_xmit.c: TX tasklet_init callback not found")
           source = source.replace("void rtl8188eu_xmit_tasklet(void *priv)",
                                   "void rtl8188eu_xmit_tasklet(unsigned long priv)", 1)
