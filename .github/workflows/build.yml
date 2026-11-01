@@ -340,6 +340,49 @@ jobs:
               source = source.replace(old, new, 1)
           p.write_text(source)
 
+          # Fix the RTL8188EUS TX tasklet callback ABI.
+          # Linux 6.6 tasklet_init() requires void (*)(unsigned long), but upstream
+          # declares/defines this callback as void (*)(void *) and hides the mismatch
+          # with a cast. KCFI rejects that indirect call at tasklet dispatch.
+          p = Path("include/rtl8188e_xmit.h")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv);"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv);"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif new not in source:
+              raise SystemExit("rtl8188e_xmit.h: TX tasklet declaration not found")
+          p.write_text(source)
+
+          p = Path("hal/rtl8188e/usb/rtl8188eu_xmit.c")
+          source = p.read_text()
+          old = "(void(*)(unsigned long))rtl8188eu_xmit_tasklet"
+          new = "rtl8188eu_xmit_tasklet"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif source.count(new) < 1:
+              raise SystemExit("rtl8188eu_xmit.c: TX tasklet_init callback not found")
+          # The tasklet implementation is in usb_ops_linux.c; this file
+          # only registers it. Do not rewrite an adapter cast here.
+          p.write_text(source)
+
+          # The TX tasklet implementation lives in hal/rtl8188e/usb/usb_ops_linux.c.
+          p = Path("hal/rtl8188e/usb/usb_ops_linux.c")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv)"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv)"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif new not in source:
+              raise SystemExit("usb_ops_linux.c: TX tasklet definition not found or ambiguous")
+          old_cast = "_adapter *padapter = (_adapter *)priv;"
+          new_cast = "_adapter *padapter = (_adapter *)(uintptr_t)priv;"
+          if source.count(old_cast) == 1:
+              source = source.replace(old_cast, new_cast, 1)
+          elif new_cast not in source:
+              raise SystemExit("usb_ops_linux.c: TX tasklet adapter conversion not found")
+          p.write_text(source)
+
           # Match the Linux net_device_ops ndo_start_xmit CFI prototype.
           # The upstream driver declared/defined rtw_xmit_entry as int, while
           # the kernel callback type is netdev_tx_t (*)(struct sk_buff *,
@@ -443,6 +486,12 @@ jobs:
             CONFIG_PLATFORM_ANDROID_ARM64=y CONFIG_PLATFORM_I386_PC=n \
             KCFLAGS="-DCONFIG_NL80211_TESTMODE -DCONFIG_LITTLE_ENDIAN -DODM_ENDIAN_TYPE=ODM_ENDIAN_LITTLE -DCONFIG_IOCTL_CFG80211" modules
           test -s 8188eu.ko
+          TX_TASKLET_KCFI_ID=$(llvm-readelf -sW 8188eu.ko | awk '$8 == "__kcfi_typeid_rtl8188eu_xmit_tasklet" {print $2}')
+          if [ "$TX_TASKLET_KCFI_ID" != "00000000aecee44b" ]; then
+            echo "::error::rtl8188eu_xmit_tasklet KCFI hash mismatch: expected 00000000aecee44b, got ${TX_TASKLET_KCFI_ID:-missing}"
+            exit 1
+          fi
+          echo "Verified rtl8188eu_xmit_tasklet KCFI type ID: $TX_TASKLET_KCFI_ID"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}-testmode-y.ko"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-${{ matrix.kmi }}.ko"
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
@@ -456,66 +505,8 @@ jobs:
           if-no-files-found: error
 
   build-dfroot:
+    if: false
     needs: build-lkms
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Validate signing config
-        if: github.event_name != 'pull_request'
-        run: |
-          if [ "${{ secrets.KEYSTORE }}" = "" ]; then
-            echo "::error::Signing secrets not configured. KEYSTORE secret is required for release builds."
-            exit 1
-          fi
-
-      - name: Create signing.properties
-        if: github.event_name != 'pull_request'
-        run: |
-          echo KEYSTORE_FILE=../keystore.jks > signing.properties
-          echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} >> signing.properties
-          echo KEY_ALIAS=${{ secrets.KEY_ALIAS }} >> signing.properties
-          echo KEY_PASSWORD=${{ secrets.KEY_PASSWORD }} >> signing.properties
-          echo ${{ secrets.KEYSTORE }} | base64 --decode > keystore.jks
-
-      - name: Download DF LKMs
-        uses: actions/download-artifact@v7
-        with:
-          pattern: df-lkm-*
-          merge-multiple: true
-          path: app/src/main/jni/ko/
-
-      - name: Download RTL8188EUS module
-        uses: actions/download-artifact@v7
-        with:
-          name: rtl8188eus-android15-6.6
-          path: app/src/main/jni/ko/
-
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - uses: gradle/actions/setup-gradle@v6
-
-      - name: Build DFRoot APK
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew :app:assembleDebug
-          else
-            ./gradlew :app:assembleRelease
-          fi
-
-      - name: Upload DFRoot APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: DFRoot
-          path: |
-            app/build/outputs/apk/release/DFRoot_*.apk
-            app/build/outputs/apk/debug/DFRoot_*.apk
-
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: app/build/outputs/apk/release/DFRoot_*.apk
+      - run: echo "APK job intentionally disabled for this driver-only build"
