@@ -436,7 +436,7 @@ jobs:
           source = p.read_text()
           import re
           source, count = re.subn(
-              r"void\\s+usb_recv_tasklet\\s*\\(\\s*[^;]+\\s*\\)\\s*;",
+              r"void\s+usb_recv_tasklet\s*\(\s*[^;]+\s*\)\s*;",
               "void usb_recv_tasklet(unsigned long priv);",
               source, count=1)
           if count != 1:
@@ -446,13 +446,13 @@ jobs:
           p = Path("os_dep/linux/usb_ops_linux.c")
           source = p.read_text()
           source, count = re.subn(
-              r"void\\s+usb_recv_tasklet\\s*\\(\\s*[^)]*\\)",
+              r"void\s+usb_recv_tasklet\s*\(\s*[^)]*\)",
               "void usb_recv_tasklet(unsigned long priv)",
               source)
           if count != 2:
               raise SystemExit(f"os_dep/linux/usb_ops_linux.c: expected 2 RX tasklet definitions, changed {count}")
           source, count = re.subn(
-              r"_adapter\\s*\\*\\s*padapter\\s*=\\s*\\(_adapter\\s*\\*\\)\\s*priv\\s*;",
+              r"_adapter\s*\*\s*padapter\s*=\s*\(_adapter\s*\*\)\s*priv\s*;",
               "_adapter *padapter = (_adapter *)(uintptr_t)priv;",
               source, count=2)
           if count != 2:
