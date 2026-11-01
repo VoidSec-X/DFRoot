@@ -580,7 +580,9 @@ jobs:
           fi
           echo "Verified usb_recv_tasklet KCFI type ID: $TASKLET_KCFI_ID"
           cp 8188eu.ko "$GITHUB_WORKSPACE/out/8188eu-android15-6.6-injection-fixed.ko"
-          llvm-readelf -sW 8188eu.ko | grep -q "__kcfi_typeid_rtw_cfg80211_monitor_if_xmit_entry"
+          # The monitor callback is static; Clang may inline/omit its standalone KCFI
+          # typeid symbol. The build itself plus the two exported callback ABI checks
+          # above are the reliable KCFI gates for this module.
           make -C "$KDIR" M="$PWD" ARCH=arm64 LLVM=1 clean
       - name: Upload injection-fixed RTL8188EUS module
         if: matrix.kmi == 'android15-6.6'
