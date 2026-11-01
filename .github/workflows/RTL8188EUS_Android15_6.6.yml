@@ -272,6 +272,47 @@ jobs:
               elif source.count(new) != 1:
                   raise SystemExit(f"{path}: expected TX callback signature not found uniquely")
               p.write_text(source)
+          # Match tasklet_init's legacy unsigned-long callback ABI exactly.
+          p = Path("include/usb_ops_linux.h")
+          source = p.read_text()
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\([^;]+\)\s*;",
+              "void usb_recv_tasklet(unsigned long priv);",
+              source, count=1)
+          if count != 1:
+              raise SystemExit("usb_ops_linux.h: recv tasklet prototype not found exactly once")
+          p.write_text(source)
+
+          p = Path("os_dep/linux/usb_ops_linux.c")
+          source = p.read_text()
+          source, count = re.subn(
+              r"void\s+usb_recv_tasklet\s*\([^)]*\)",
+              "void usb_recv_tasklet(unsigned long priv)",
+              source)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected two recv tasklet definitions, changed {count}")
+          source, count = re.subn(
+              r"_adapter\s*\*\s*padapter\s*=\s*\(_adapter\s*\*\)\s*priv\s*;",
+              "_adapter *padapter = (_adapter *)(uintptr_t)priv;",
+              source, count=2)
+          if count != 2:
+              raise SystemExit(f"usb_ops_linux.c: expected two tasklet data conversions, changed {count}")
+          p.write_text(source)
+
+          p = Path("hal/hal_hci/hal_usb.c")
+          source = p.read_text()
+          pattern = re.compile(
+              r"(tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*)"
+              r"\(\s*void\s*\(\s*\*\s*\)\s*\(\s*unsigned\s+long\s*\)\s*\)\s*"
+              r"usb_recv_tasklet",
+              re.S)
+          source, count = pattern.subn(r"\1usb_recv_tasklet", source, count=1)
+          if count != 1 and not re.search(
+              r"tasklet_init\s*\(\s*&precvpriv->recv_tasklet\s*,\s*usb_recv_tasklet\s*,",
+              source, re.S):
+              raise SystemExit("hal_usb.c: recv tasklet_init callback not found")
+          p.write_text(source)
+
           PY
 
           # Match the Android common 6.6.127 cfg80211 declarations.
