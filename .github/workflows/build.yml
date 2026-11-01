@@ -362,14 +362,8 @@ jobs:
               source = source.replace(old, new, 1)
           elif source.count(new) < 1:
               raise SystemExit("rtl8188eu_xmit.c: TX tasklet_init callback not found")
-          source = source.replace("void rtl8188eu_xmit_tasklet(void *priv)",
-                                  "void rtl8188eu_xmit_tasklet(unsigned long priv)", 1)
-          old_cast = "_adapter *padapter = (_adapter *)priv;"
-          new_cast = "_adapter *padapter = (_adapter *)(uintptr_t)priv;"
-          if source.count(old_cast) == 1:
-              source = source.replace(old_cast, new_cast, 1)
-          elif new_cast not in source:
-              raise SystemExit("rtl8188eu_xmit.c: adapter conversion not found")
+          # The tasklet implementation is in usb_ops_linux.c; this file
+          # only registers it. Do not rewrite an adapter cast here.
           p.write_text(source)
 
           # The TX tasklet implementation lives in hal/rtl8188e/usb/usb_ops_linux.c.
