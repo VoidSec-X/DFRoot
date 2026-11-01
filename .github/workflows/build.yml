@@ -1,4 +1,4 @@
-name: Build
+name: Build # trigger TX callback validation build
 
 on:
   push:
