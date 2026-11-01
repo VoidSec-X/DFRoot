@@ -326,7 +326,7 @@ jobs:
           p = Path("include/xmit_osdep.h")
           source = p.read_text()
           legacy = "extern int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);"
-          prototype = "extern enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev);"
+          prototype = "extern netdev_tx_t rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev);"
           # The Linux declaration is present in upstream v5.3.9, but the
           # FreeBSD copy is also identical. Anchor the insertion to the
           # PLATFORM_LINUX block so the Linux prototype is never ambiguous.
@@ -344,10 +344,9 @@ jobs:
           p = Path("os_dep/linux/xmit_linux.c")
           source = p.read_text()
           legacy_def = "int rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)"
-          wrapper = """enum netdev_tx rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev)
+          wrapper = """netdev_tx_t rtl8188eu_ndo_start_xmit(struct sk_buff *skb, struct net_device *dev)
           {
-              rtw_xmit_entry((_pkt *)skb, (_nic_hdl)dev);
-              return NETDEV_TX_OK;
+              return (netdev_tx_t)rtw_xmit_entry((_pkt *)skb, (_nic_hdl)dev);
           }"""
           if source.count(legacy_def) != 1:
               raise SystemExit("xmit_linux.c: expected original legacy TX definition exactly once")
@@ -366,6 +365,9 @@ jobs:
           if count != 2:
               raise SystemExit(f"os_intfs.c: expected exactly two legacy ndo_start_xmit assignments, found {count}")
           p.write_text(updated)
+          # Fail unless both netdev instances use the typed callback.
+          if updated.count("rtl8188eu_ndo_start_xmit") != 2:
+              raise SystemExit("os_intfs.c: expected exactly two typed TX callback assignments")
           for path in Path(".").rglob("*"):
               if not path.is_file() or path.suffix not in (".c", ".h", ".cc", ".cpp"):
                   continue
@@ -380,10 +382,10 @@ jobs:
           for path, old, new in (
               ("os_dep/linux/ioctl_cfg80211.c",
                "static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)",
-               "static enum netdev_tx rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
+               "static netdev_tx_t rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)"),
               ("os_dep/linux/mlme_linux.c",
                "static int mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)",
-               "static enum netdev_tx mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
+               "static netdev_tx_t mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)"),
           ):
               p = Path(path)
               source = p.read_text()
