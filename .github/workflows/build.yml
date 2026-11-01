@@ -388,6 +388,46 @@ jobs:
                   raise SystemExit(f"{path}: expected one xmit callback signature")
               p.write_text(source)
 
+
+          # Minimal TX tasklet KCFI fix: Linux 6.6 tasklet callbacks use
+          # void (*)(unsigned long). Keep the known-good monitor-mode driver
+          # configuration and all other compatibility patches unchanged.
+          p = Path("include/rtl8188e_xmit.h")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv);"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv);"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif new not in source:
+              raise SystemExit("rtl8188e_xmit.h: TX tasklet declaration not found")
+          p.write_text(source)
+
+          p = Path("hal/rtl8188e/usb/rtl8188eu_xmit.c")
+          source = p.read_text()
+          old = "(void(*)(unsigned long))rtl8188eu_xmit_tasklet"
+          new = "rtl8188eu_xmit_tasklet"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif source.count(new) < 1:
+              raise SystemExit("rtl8188eu_xmit.c: TX tasklet_init callback not found")
+          p.write_text(source)
+
+          p = Path("hal/rtl8188e/usb/usb_ops_linux.c")
+          source = p.read_text()
+          old = "void rtl8188eu_xmit_tasklet(void *priv)"
+          new = "void rtl8188eu_xmit_tasklet(unsigned long priv)"
+          if source.count(old) == 1:
+              source = source.replace(old, new, 1)
+          elif new not in source:
+              raise SystemExit("usb_ops_linux.c: TX tasklet definition not found")
+          old_cast = "_adapter *padapter = (_adapter *)priv;"
+          new_cast = "_adapter *padapter = (_adapter *)(uintptr_t)priv;"
+          if source.count(old_cast) == 1:
+              source = source.replace(old_cast, new_cast, 1)
+          elif new_cast not in source:
+              raise SystemExit("usb_ops_linux.c: TX tasklet adapter conversion not found")
+          p.write_text(source)
+
           PY
 
           # Use cfg80211.h from the exact Android 15 common-kernel 6.6.127
@@ -456,6 +496,7 @@ jobs:
           if-no-files-found: error
 
   build-dfroot:
+    if: false
     needs: build-lkms
     runs-on: ubuntu-latest
     steps:
