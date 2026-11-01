@@ -353,7 +353,7 @@ jobs:
           p = Path("os_dep/linux/os_intfs.c")
           source = p.read_text()
           updated, count = re.subn(
-              r"(\\bndo_start_xmit\\s*=\\s*)&?\\s*rtw_xmit_entry\\b",
+              r"(\bndo_start_xmit\s*=\s*)&?\s*rtw_xmit_entry\b",
               r"\\1rtl8188eu_ndo_start_xmit",
               source)
           if count != 2:
@@ -366,7 +366,7 @@ jobs:
                   source = path.read_text()
               except (UnicodeDecodeError, OSError):
                   continue
-              if re.search(r"\\bndo_start_xmit\\s*=\\s*&?\\s*rtw_xmit_entry\\b", source):
+              if re.search(r"\bndo_start_xmit\s*=\s*&?\s*rtw_xmit_entry\b", source):
                   raise SystemExit(f"{path}: legacy rtw_xmit_entry remains assigned to ndo_start_xmit")
           # The monitor and hostapd management interfaces have their own
           # ndo_start_xmit callbacks; make their return type the exact enum too.
