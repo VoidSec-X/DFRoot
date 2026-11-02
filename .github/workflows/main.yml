@@ -143,8 +143,8 @@ jobs:
           # connect request and caused the observed NULL dereference on client join.
           p = Path("include/autoconf.h")
           source = p.read_text()
-          if not re.search(r"^\\s*#\\s*define\\s+RTW_USE_CFG80211_STA_EVENT\\b", source, re.M):
-              source = source.rstrip() + "\\n#define RTW_USE_CFG80211_STA_EVENT\\n"
+          if not re.search(r"^\s*#\s*define\s+RTW_USE_CFG80211_STA_EVENT\b", source, re.M):
+              source = source.rstrip() + "\n#define RTW_USE_CFG80211_STA_EVENT\n"
               p.write_text(source)
           # Keep CONFIG_P2P enabled. The station driver retains its upstream
           # P2P callbacks and timer lifecycle; do not rewrite cfg80211 ops here.
