@@ -1,90 +1,67 @@
-name: Build VHCI kernel module (Android 15 GKI 6.6)
+name: Build VHCI Android 15 6.6
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/VHCI_Android15_6.6.yml"
 
 permissions:
   contents: read
 
 jobs:
   build-vhci:
-    name: Build hci_vhci.ko (arm64)
+    name: hci_vhci.ko / Android 15 6.6
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
       options: --privileged
     steps:
       - name: Checkout DFRoot
-        uses: actions/checkout@v4
-
-      - name: Show build environment
-        shell: bash
-        run: |
-          set -euxo pipefail
-          uname -a
-          echo "ARCH=${ARCH:-arm64}"
-          test -d /kernel || true
-          pwd
-
-      - name: Locate Android 15 6.6 kernel build tree
-        shell: bash
-        run: |
-          set -euxo pipefail
-          for d in /kernel /workspace/kernel /src/kernel "$GITHUB_WORKSPACE/kernel"; do
-            if [ -d "$d" ] && [ -f "$d/Makefile" ]; then
-              echo "KERNEL_SRC=$d" >> "$GITHUB_ENV"
-              exit 0
-            fi
-          done
-          echo "No kernel source tree found in expected DDK paths." >&2
-          echo "Inspect the DDK image and update KERNEL_SRC in this workflow." >&2
-          exit 1
-
-      - name: Prepare kernel configuration
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "$KERNEL_SRC"
-          if [ ! -f .config ]; then
-            if [ -f /out/.config ]; then
-              cp /out/.config .config
-            elif [ -f arch/arm64/configs/gki_defconfig ]; then
-              make ARCH=arm64 LLVM=1 gki_defconfig
-            else
-              echo "No matching .config or GKI defconfig found." >&2
-              exit 1
-            fi
-          fi
-          grep -E '^(CONFIG_MODULES|CONFIG_BT|CONFIG_BT_HCIVHCI|CONFIG_MODVERSIONS)=' .config || true
-          if ! grep -q '^CONFIG_BT_HCIVHCI=m' .config; then
-            scripts/config --module BT_HCIVHCI
-            make ARCH=arm64 LLVM=1 olddefconfig
-          fi
+        uses: actions/checkout@v7
 
       - name: Build hci_vhci.ko
         shell: bash
         run: |
           set -euxo pipefail
-          cd "$KERNEL_SRC"
-          make ARCH=arm64 LLVM=1 -j"$(nproc)" M=drivers/bluetooth modules
-          test -f drivers/bluetooth/hci_vhci.ko
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          cp drivers/bluetooth/hci_vhci.ko "$GITHUB_WORKSPACE/out/"
-          if [ -f Module.symvers ]; then
-            cp Module.symvers "$GITHUB_WORKSPACE/out/Module.symvers"
-          fi
-          if command -v llvm-readelf >/dev/null 2>&1; then
-            llvm-readelf -h "$GITHUB_WORKSPACE/out/hci_vhci.ko"
-          fi
-          modinfo "$GITHUB_WORKSPACE/out/hci_vhci.ko" || true
 
-      - name: Upload VHCI module artifact
-        uses: actions/upload-artifact@v4
+          : "${KDIR:?DDK image did not provide KDIR}"
+          test -f "$KDIR/Makefile"
+          test -f "$KDIR/drivers/bluetooth/Makefile"
+          test -f "$KDIR/drivers/bluetooth/hci_vhci.c"
+
+          echo "KDIR=$KDIR"
+          echo "Kernel release: $(make -s -C "$KDIR" ARCH=arm64 LLVM=1 kernelrelease)"
+
+          # Enable VHCI as a loadable module in the DDK kernel configuration.
+          if [ -x "$KDIR/scripts/config" ]; then
+            "$KDIR/scripts/config" --module BT
+            "$KDIR/scripts/config" --module BT_HCIVHCI
+            make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
+          fi
+
+          grep -E '^(CONFIG_BT|CONFIG_BT_HCIVHCI|CONFIG_MODULES|CONFIG_MODVERSIONS)=' "$KDIR/.config" || true
+
+          # Build only the VHCI object; leave the RTL8188EUS workflows untouched.
+          make -C "$KDIR" ARCH=arm64 LLVM=1 -j"$(nproc)" \
+            CONFIG_BT=m CONFIG_BT_HCIVHCI=m \
+            M="$KDIR/drivers/bluetooth" modules
+
+          test -s "$KDIR/drivers/bluetooth/hci_vhci.ko"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$KDIR/drivers/bluetooth/hci_vhci.ko" "$GITHUB_WORKSPACE/out/"
+
+          if command -v modinfo >/dev/null 2>&1; then
+            modinfo "$GITHUB_WORKSPACE/out/hci_vhci.ko" | tee "$GITHUB_WORKSPACE/out/modinfo.txt"
+          fi
+
+          if [ -f "$KDIR/Module.symvers" ]; then
+            cp "$KDIR/Module.symvers" "$GITHUB_WORKSPACE/out/Module.symvers"
+          fi
+
+          llvm-readelf -h "$GITHUB_WORKSPACE/out/hci_vhci.ko"
+
+      - name: Upload VHCI module
+        uses: actions/upload-artifact@v7
         with:
-          name: hci-vhci-ko-arm64-android15-gki66
+          name: hci-vhci-android15-6.6-arm64
           path: out/
           if-no-files-found: error
           retention-days: 14
