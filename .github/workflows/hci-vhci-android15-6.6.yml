@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-hci-vhci:
-    name: hci_vhci.ko / Android 15 GKI 6.6
+    name: hci_vhci.ko / ARM64 / Android 15 6.6
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
@@ -21,38 +21,43 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
+
+          : "${KDIR:?DDK image did not provide KDIR}"
+          test -f "$KDIR/Makefile"
           test -f "$KDIR/Module.symvers"
           test -f "$KDIR/include/generated/autoconf.h"
+          test -f "$KDIR/drivers/bluetooth/hci_vhci.c"
+          test -f "$KDIR/drivers/bluetooth/Makefile"
 
-          # hci_vhci is a kernel Bluetooth VHCI transport module.
-          # It does not have separate AIDL/HIDL builds; those are userspace HAL APIs.
-          if grep -q '^CONFIG_BT_HCIVHCI=m' "$KDIR/.config"; then
-            echo "CONFIG_BT_HCIVHCI=m already enabled"
-          elif grep -q '^CONFIG_BT_HCIVHCI=y' "$KDIR/.config"; then
-            echo "CONFIG_BT_HCIVHCI is built into this kernel; an external .ko cannot be produced."
-            exit 1
-          else
-            echo "CONFIG_BT_HCIVHCI is not enabled in this DDK config; preparing external module build."
-          fi
+          echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
+          echo "Phone kernelrelease: 6.6.118-android15-8-o-g25c0665dd40c-4k"
+          echo "CONFIG_BT_HCIVHCI in DDK:"
+          grep -E '^(CONFIG_BT_HCIVHCI=|# CONFIG_BT_HCIVHCI is not set)' "$KDIR/.config" || true
 
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          make -C "$KDIR" M="$KDIR/drivers/bluetooth" ARCH=arm64 LLVM=1             CONFIG_BT_HCIVHCI=m modules
+          # Build only the kernel VHCI transport module. AIDL/HIDL are
+          # userspace Bluetooth HAL APIs; hci_vhci.ko has no AIDL/HIDL variant.
+          make -C "$KDIR" M="$KDIR/drivers/bluetooth" \
+            ARCH=arm64 LLVM=1 CONFIG_BT_HCIVHCI=m modules
 
           MODULE="$KDIR/drivers/bluetooth/hci_vhci.ko"
           test -s "$MODULE"
           llvm-readelf -h "$MODULE" | grep -q 'AArch64'
-          cp "$MODULE" "$GITHUB_WORKSPACE/out/hci_vhci.ko"
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$MODULE" "$GITHUB_WORKSPACE/out/hci_vhci-android15-6.6-arm64.ko"
 
           if command -v modinfo >/dev/null 2>&1; then
-            modinfo "$GITHUB_WORKSPACE/out/hci_vhci.ko" | tee "$GITHUB_WORKSPACE/out/modinfo.txt"
+            modinfo "$GITHUB_WORKSPACE/out/hci_vhci-android15-6.6-arm64.ko" \
+              | tee "$GITHUB_WORKSPACE/out/modinfo.txt"
           fi
-          llvm-readelf -sW "$GITHUB_WORKSPACE/out/hci_vhci.ko" > "$GITHUB_WORKSPACE/out/symbols.txt"
-          sha256sum "$GITHUB_WORKSPACE/out/hci_vhci.ko" | tee "$GITHUB_WORKSPACE/out/SHA256SUMS"
+          llvm-readelf -sW "$GITHUB_WORKSPACE/out/hci_vhci-android15-6.6-arm64.ko" \
+            > "$GITHUB_WORKSPACE/out/symbols.txt"
+          sha256sum "$GITHUB_WORKSPACE/out/hci_vhci-android15-6.6-arm64.ko" \
+            | tee "$GITHUB_WORKSPACE/out/SHA256SUMS"
 
       - name: Upload VHCI kernel module
         uses: actions/upload-artifact@v7
         with:
-          name: hci-vhci-android15-gki66-arm64
+          name: hci-vhci-android15-6.6-arm64
           path: out/*
           if-no-files-found: error
