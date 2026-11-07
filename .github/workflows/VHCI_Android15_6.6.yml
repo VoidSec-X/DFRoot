@@ -16,31 +16,39 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Build hci_vhci.ko
+      - name: Fetch Android common kernel source
         shell: bash
         run: |
           set -euxo pipefail
-
           : "${KDIR:?DDK did not set KDIR}"
           test -f "$KDIR/Makefile"
-          test -f "$KDIR/drivers/bluetooth/Makefile"
-          test -f "$KDIR/drivers/bluetooth/hci_vhci.c"
 
-          echo "KDIR=$KDIR"
+          # The minimal DDK image has prepared headers/build metadata, but
+          # deliberately does not ship the in-tree drivers/bluetooth source.
+          # Fetch the exact Android common 6.6.127 source revision used for
+          # this kernel family, then build VHCI as an external module.
+          git clone --depth=1 https://android.googlesource.com/kernel/common "$GITHUB_WORKSPACE/kernel-common"
+          cd "$GITHUB_WORKSPACE/kernel-common"
+          git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
+          git checkout --detach FETCH_HEAD
+
+          test -f drivers/bluetooth/hci_vhci.c
+          test -f drivers/bluetooth/Makefile
+          echo "Kernel source: $(git rev-parse HEAD)"
           echo "DDK kernelrelease: $(make -s -C "$KDIR" kernelrelease)"
-          grep -E '^(CONFIG_MODULES|CONFIG_BT|CONFIG_BT_HCIVHCI|CONFIG_MODVERSIONS|CONFIG_KALLSYMS)=' "$KDIR/.config" || true
 
-          # Use the DDK's prepared Android 15 / GKI 6.6 configuration and
-          # symbol version data; do not reconfigure or replace the kernel tree.
-          make -C "$KDIR" M="$KDIR/drivers/bluetooth" ARCH=arm64 LLVM=1 clean
-          make -C "$KDIR" M="$KDIR/drivers/bluetooth" ARCH=arm64 LLVM=1 \
-            CONFIG_BT=m CONFIG_BT_HCIVHCI=m modules
+          # Use the DDK's configured kernel build tree and symbol CRCs, while
+          # compiling the source file from the matching Android common tree.
+          make -C "$KDIR" M="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth" \
+            ARCH=arm64 LLVM=1 clean
+          make -C "$KDIR" M="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth" \
+            ARCH=arm64 LLVM=1 CONFIG_BT=m CONFIG_BT_HCIVHCI=m modules
 
-          test -s "$KDIR/drivers/bluetooth/hci_vhci.ko"
+          test -s "$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth/hci_vhci.ko"
           mkdir -p "$GITHUB_WORKSPACE/out"
-          cp "$KDIR/drivers/bluetooth/hci_vhci.ko" "$GITHUB_WORKSPACE/out/hci_vhci.ko"
+          cp "$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth/hci_vhci.ko" \
+            "$GITHUB_WORKSPACE/out/hci_vhci.ko"
 
-          # Keep metadata alongside the module for vermagic / dependency checks.
           modinfo "$GITHUB_WORKSPACE/out/hci_vhci.ko" | tee "$GITHUB_WORKSPACE/out/modinfo.txt"
           llvm-readelf -h "$GITHUB_WORKSPACE/out/hci_vhci.ko"
           if [ -f "$KDIR/Module.symvers" ]; then
