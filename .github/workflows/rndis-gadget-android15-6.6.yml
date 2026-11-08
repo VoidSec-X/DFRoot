@@ -33,7 +33,7 @@ jobs:
             if grep -q "^CONFIG_${key}=" "$KDIR/.config"; then
               sed -i "s/^CONFIG_${key}=.*/CONFIG_${key}=${value}/" "$KDIR/.config"
             else
-              printf 'CONFIG_%s=%s\\n' "$key" "$value" >> "$KDIR/.config"
+              printf 'CONFIG_%s=%s\n' "$key" "$value" >> "$KDIR/.config"
             fi
           }
 
