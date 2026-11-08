@@ -11,15 +11,14 @@ permissions:
 
 jobs:
   build:
-    name: Build and validate RNDIS gadget modules
+    name: Configure and build RNDIS gadget support
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
       image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
-      options: --privileged
 
     steps:
-      - name: Inspect DDK config and enable RNDIS configfs support
+      - name: Inspect DDK kernel tree and enable RNDIS
         shell: bash
         run: |
           set -euxo pipefail
@@ -27,28 +26,35 @@ jobs:
           test -f "$KDIR/Makefile"
           test -s "$KDIR/.config"
           echo "Base kernel release: $(make -s -C "$KDIR" kernelrelease)"
-          grep -E '^CONFIG_(USB_GADGET|USB_CONFIGFS|USB_CONFIGFS_RNDIS|USB_LIBCOMPOSITE|USB_U_ETHER|USB_F_RNDIS|NET|INET)=' "$KDIR/.config" || true
+          grep -E '^CONFIG_(USB|USB_GADGET|USB_CONFIGFS|USB_CONFIGFS_RNDIS|USB_LIBCOMPOSITE|USB_U_ETHER|USB_F_RNDIS|NET|INET)=' "$KDIR/.config" || true
 
-          # RNDIS is a bool configfs option (not a tristate/module). Enabling it
-          # selects USB_F_RNDIS and USB_U_ETHER; those may be built-in (=y).
-          CONFIG_TOOL="$KDIR/scripts/config"
-          test -x "$CONFIG_TOOL"
-          "$CONFIG_TOOL" --file "$KDIR/.config" -e USB_GADGET
-          "$CONFIG_TOOL" --file "$KDIR/.config" -e USB_CONFIGFS
-          "$CONFIG_TOOL" --file "$KDIR/.config" -e NET
-          "$CONFIG_TOOL" --file "$KDIR/.config" -e INET
-          "$CONFIG_TOOL" --file "$KDIR/.config" -e USB_CONFIGFS_RNDIS
+          # The DDK image doesn't ship scripts/config. Edit only the requested
+          # symbols, then let Kconfig resolve dependencies using olddefconfig.
+          cp "$KDIR/.config" "$GITHUB_WORKSPACE/ddk.config.before"
+          for symbol in USB USB_GADGET USB_CONFIGFS NET INET; do
+            if grep -q "^CONFIG_${symbol}=" "$KDIR/.config"; then
+              sed -i "s/^CONFIG_${symbol}=.*/CONFIG_${symbol}=y/" "$KDIR/.config"
+            else
+              printf 'CONFIG_%s=y\n' "$symbol" >> "$KDIR/.config"
+            fi
+          done
+          if grep -q '^CONFIG_USB_CONFIGFS_RNDIS=' "$KDIR/.config"; then
+            sed -i 's/^CONFIG_USB_CONFIGFS_RNDIS=.*/CONFIG_USB_CONFIGFS_RNDIS=y/' "$KDIR/.config"
+          else
+            printf 'CONFIG_USB_CONFIGFS_RNDIS=y\n' >> "$KDIR/.config"
+          fi
+
           make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
-
-          for symbol in USB_GADGET USB_CONFIGFS USB_CONFIGFS_RNDIS NET INET USB_LIBCOMPOSITE USB_U_ETHER USB_F_RNDIS; do
+          for symbol in USB USB_GADGET USB_CONFIGFS USB_CONFIGFS_RNDIS NET INET USB_LIBCOMPOSITE USB_U_ETHER USB_F_RNDIS; do
             grep -q "^CONFIG_${symbol}=y$" "$KDIR/.config" || {
-              echo "::error::CONFIG_${symbol} did not resolve to built-in after olddefconfig."
+              echo "::error::CONFIG_${symbol} did not resolve to =y after olddefconfig."
+              grep -E "^CONFIG_(USB|USB_GADGET|USB_CONFIGFS|USB_LIBCOMPOSITE|USB_U_ETHER|USB_F_RNDIS|NET|INET)" "$KDIR/.config" || true
               exit 1
             }
           done
-          echo "RNDIS configfs enabled; selected implementation symbols are built-in."
+          cp "$KDIR/.config" "$GITHUB_WORKSPACE/ddk.config.rndis"
 
-      - name: Fetch pinned Android common v6.6 gadget sources
+      - name: Check Android common RNDIS source and Kbuild target mapping
         shell: bash
         run: |
           set -euxo pipefail
@@ -58,12 +64,14 @@ jobs:
           git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
           git checkout --detach FETCH_HEAD
           SRC="$GITHUB_WORKSPACE/kernel-common/drivers/usb/gadget"
-          for file in Kconfig Makefile composite.c configfs.c function/f_rndis.c function/rndis.c function/u_ether.c; do
+          for file in Kconfig Makefile composite.c function/Kconfig function/Makefile function/f_rndis.c function/rndis.c function/u_ether.c; do
             test -s "$SRC/$file"
           done
+          grep -n -A8 -B2 'config USB_CONFIGFS_RNDIS' "$SRC/Kconfig"
+          grep -nE 'USB_(LIBCOMPOSITE|U_ETHER|F_RNDIS)' "$SRC/Makefile" "$SRC/function/Makefile" || true
           echo "Pinned Android common source: $(git rev-parse HEAD)"
 
-      - name: Confirm module buildability and package available modules
+      - name: Build only tristate components and validate built-in RNDIS config
         shell: bash
         run: |
           set -euxo pipefail
@@ -71,45 +79,33 @@ jobs:
           OUT="$GITHUB_WORKSPACE/out"
           mkdir -p "$OUT"
 
-          # With this DDK's RNDIS symbols resolved to =y, these components
-          # are part of vmlinux and must not be fabricated as standalone .ko.
-          # Build the external-module target only when the prepared kernel
-          # exports a real tristate module configuration.
+          # Kconfig selects RNDIS helpers when CONFIG_USB_CONFIGFS_RNDIS=y.
+          # A =y object is linked into vmlinux and cannot be emitted as .ko.
+          # This Android 15 DDK's config is checked above for exact values.
           for symbol in USB_LIBCOMPOSITE USB_U_ETHER USB_F_RNDIS; do
-            value="$(sed -n "s/^CONFIG_${symbol}=//p" "$KDIR/.config" | tail -n1)"
-            case "$value" in
-              m)
-                echo "CONFIG_${symbol}=m, but source target must be mapped from the in-tree Makefile."
-                ;;
-              y)
-                echo "CONFIG_${symbol}=y (built into the kernel; no separate .ko)."
-                ;;
-              *)
-                echo "::error::Unexpected CONFIG_${symbol} value: ${value:-unset}"
-                exit 1
-                ;;
-            esac
+            grep -q "^CONFIG_${symbol}=y$" "$KDIR/.config"
+            echo "CONFIG_${symbol}=y (built-in)"
           done
 
-          echo "RNDIS function availability is represented by the enabled configfs option and built-in kernel objects."
-          echo "Kernel source Makefile mapping:"
-          grep -nE 'USB_(LIBCOMPOSITE|U_ETHER|F_RNDIS)' "$SRC/Makefile" "$SRC/function/Makefile" || true
-          grep -n -A5 -B2 'config USB_CONFIGFS_RNDIS' "$SRC/Kconfig"
-
-          cp "$KDIR/.config" "$OUT/ddk-config.txt"
+          # The prepared DDK tree is not guaranteed to include the matching
+          # source Makefiles. Avoid compiling unrelated upstream objects with
+          # a hand-written obj-m list; preserve real build/config metadata.
+          cp "$KDIR/.config" "$OUT/kernel-config-rndis.txt"
+          cp "$GITHUB_WORKSPACE/ddk.config.before" "$OUT/kernel-config-original.txt"
           {
             echo "DDK image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
             echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-            echo "Source: Android common kernel commit adaba3e91947a078e89f9990010e3adc2aafce7b"
-            echo "RNDIS configfs option: enabled"
-            echo "Selected implementation objects are built-in (=y) in this DDK configuration; no standalone .ko is emitted for built-in objects."
-            echo "This workflow validates kernel RNDIS config and packages the effective config; it does not claim a loadable RNDIS .ko."
-            echo "A functional gadget additionally requires a compatible UDC controller, configfs mount/setup, Android USB gadget HAL/init integration and device-specific kernel support."
-            echo "DDK kernel release must be compared with the phone kernel before use."
+            echo "Android common source commit: adaba3e91947a078e89f9990010e3adc2aafce7b"
+            echo "CONFIG_USB_CONFIGFS_RNDIS=y"
+            echo "CONFIG_USB_F_RNDIS=y, CONFIG_USB_U_ETHER=y and CONFIG_USB_LIBCOMPOSITE=y"
+            echo "These implementation objects are built into the DDK kernel; standalone .ko files do not exist for built-in objects."
+            echo "This artifact confirms enabled RNDIS configfs support. It is not a loadable RNDIS module."
+            echo "A working USB gadget still requires a suitable UDC, configfs gadget setup and Android USB gadget HAL/init integration."
+            echo "DDK release is 6.6.127-4k; compare against the phone's exact kernel release, config and symbol versions."
           } | tee "$OUT/README.txt"
-          (cd "$OUT" && sha256sum ddk-config.txt README.txt > SHA256SUMS)
+          (cd "$OUT" && sha256sum *.txt > SHA256SUMS)
 
-      - name: Upload validated RNDIS configuration bundle
+      - name: Upload validated RNDIS config bundle
         uses: actions/upload-artifact@v4
         with:
           name: rndis-gadget-android15-6.6
