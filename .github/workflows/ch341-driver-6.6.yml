@@ -1,0 +1,84 @@
+name: Build CH341 USB-Serial Driver (Android 15 GKI 6.6)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ch341-driver-6.6.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and validate ch341.ko
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+
+    steps:
+      - name: Check DDK kernel build tree and USB-serial core
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${KDIR:-}" && test -f "$KDIR/Makefile" || {
+            echo "::error::DDK kernel build tree (KDIR) is unavailable."
+            exit 1
+          }
+          echo "KDIR=$KDIR"
+          echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          grep -Eq '^CONFIG_USB_SERIAL=(m|y)$' "$KDIR/.config" || {
+            echo "::error::CONFIG_USB_SERIAL is not enabled in the DDK config."
+            exit 1
+          }
+          grep -E '^CONFIG_(USB|USB_SERIAL|TTY)' "$KDIR/.config" | sort || true
+
+      - name: Fetch CH341 source from Linux v6.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch v6.6 https://github.com/torvalds/linux.git "$GITHUB_WORKSPACE/linux-source"
+          install -m 0644 "$GITHUB_WORKSPACE/linux-source/drivers/usb/serial/ch341.c" "$GITHUB_WORKSPACE/ch341.c"
+          # Keep the include compatible with the Android 6.6 DDK header layout.
+          if grep -q '^#include <linux/unaligned.h>' "$GITHUB_WORKSPACE/ch341.c"; then
+            sed -i 's|^#include <linux/unaligned.h>|#include <asm/unaligned.h>|' "$GITHUB_WORKSPACE/ch341.c"
+          fi
+          grep -q 'MODULE_LICENSE' "$GITHUB_WORKSPACE/ch341.c"
+
+      - name: Build ch341.ko against Android 15 DDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          printf 'obj-m += ch341.o\n' > "$GITHUB_WORKSPACE/Makefile"
+          make -C "$KDIR" M="$GITHUB_WORKSPACE" ARCH=arm64 LLVM=1 modules V=1
+          test -s "$GITHUB_WORKSPACE/ch341.ko"
+          install -m 0644 "$GITHUB_WORKSPACE/ch341.ko" "$GITHUB_WORKSPACE/out/ch341.ko"
+
+      - name: Validate module metadata and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/ch341.ko
+          modinfo out/ch341.ko | tee out/modinfo.txt
+          grep -q '^name: *ch341' out/modinfo.txt
+          modinfo -F vermagic out/ch341.ko | tee out/module-vermagic.txt
+          llvm-readelf -h out/ch341.ko | grep -E 'Class:|Machine:'
+          {
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "Driver purpose: CH340/CH341 USB-to-serial adapters."
+            echo "Built against the DDK kernel, not the phone's exact 6.6.118 build."
+            echo "Check vermagic, symbol CRCs, exported USB-serial symbols and kernel config before attempting to load."
+            echo "Build/package only: this workflow does not install or load the module on a device."
+          } | tee out/README.txt
+          sha256sum out/ch341.ko | tee out/SHA256SUMS
+
+      - name: Upload CH341 module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch341-android15-6.6
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
