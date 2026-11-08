@@ -1,0 +1,86 @@
+name: Build PL2303 USB-Serial Driver (Android 15 GKI 6.6)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/pl2303-driver-6.6.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and validate pl2303.ko
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+      options: --privileged
+
+    steps:
+      - name: Check DDK kernel USB-serial configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${KDIR:?DDK kernel build tree (KDIR) is unavailable}"
+          test -f "$KDIR/Makefile"
+          test -s "$KDIR/.config"
+          echo "KDIR=$KDIR"
+          echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config" || {
+            echo "::error::CONFIG_USB is not enabled in the DDK config."
+            exit 1
+          }
+          grep -Eq '^CONFIG_USB_SERIAL=(m|y)$' "$KDIR/.config" || {
+            echo "::error::CONFIG_USB_SERIAL is not enabled in the DDK config; pl2303 requires the USB-serial core."
+            exit 1
+          }
+          grep -E '^CONFIG_(USB|USB_SERIAL|USB_SERIAL_PL2303|TTY)=' "$KDIR/.config" | sort || true
+
+      - name: Fetch PL2303 source from Linux v6.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch v6.6 https://github.com/torvalds/linux.git "$GITHUB_WORKSPACE/linux-source"
+          install -m 0644 "$GITHUB_WORKSPACE/linux-source/drivers/usb/serial/pl2303.c" "$GITHUB_WORKSPACE/pl2303.c"
+          grep -q 'MODULE_LICENSE' "$GITHUB_WORKSPACE/pl2303.c"
+          grep -q 'usb_serial_register' "$GITHUB_WORKSPACE/pl2303.c"
+
+      - name: Build pl2303.ko against Android 15 DDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          printf 'obj-m += pl2303.o\n' > "$GITHUB_WORKSPACE/Makefile"
+          make -C "$KDIR" M="$GITHUB_WORKSPACE" ARCH=arm64 LLVM=1 modules V=1
+          test -s "$GITHUB_WORKSPACE/pl2303.ko"
+          install -m 0644 "$GITHUB_WORKSPACE/pl2303.ko" "$GITHUB_WORKSPACE/out/pl2303.ko"
+
+      - name: Validate module metadata and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/pl2303.ko
+          modinfo out/pl2303.ko | tee out/modinfo.txt
+          grep -q '^name: *pl2303' out/modinfo.txt
+          modinfo -F vermagic out/pl2303.ko | tee out/module-vermagic.txt
+          llvm-readelf -h out/pl2303.ko | grep -E 'Class:|Machine:'
+          {
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Source: Linux v6.6 drivers/usb/serial/pl2303.c"
+            echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "Driver purpose: Prolific PL2303 USB-to-serial adapters."
+            echo "Requires the matching USB-serial core and compatible exported symbols."
+            echo "Built against DDK 6.6.127; this is not a guarantee of compatibility with the phone's exact 6.6.118 kernel."
+            echo "Build/package only; no device installation or module loading."
+          } | tee out/README.txt
+          sha256sum out/pl2303.ko | tee out/SHA256SUMS
+
+      - name: Upload PL2303 module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pl2303-android15-6.6
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
