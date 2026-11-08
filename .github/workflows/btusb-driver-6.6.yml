@@ -19,7 +19,7 @@ jobs:
       options: --privileged
 
     steps:
-      - name: Fetch Android common kernel Bluetooth sources
+      - name: Fetch only Bluetooth USB driver sources
         shell: bash
         run: |
           set -euxo pipefail
@@ -30,24 +30,22 @@ jobs:
           grep -Eq '^CONFIG_BT=m$' "$KDIR/.config"
           grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config"
 
-          git clone --no-checkout https://android.googlesource.com/kernel/common "$GITHUB_WORKSPACE/kernel-common"
-          cd "$GITHUB_WORKSPACE/kernel-common"
-          git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
-          git checkout --detach FETCH_HEAD
-
-          SRC="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth"
-          test -s "$SRC/btusb.c"
-          test -s "$SRC/Makefile"
-          test -s "$SRC/btintel.h"
+          BASE="https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/drivers/bluetooth"
+          SRC="$GITHUB_WORKSPACE/bluetooth-src"
+          mkdir -p "$SRC"
+          for file in btusb.c Makefile btintel.h btbcm.h btrtl.h btmtk.h btqca.h; do
+            curl -fL --retry 3 "$BASE/$file?format=TEXT" | base64 -d > "$SRC/$file"
+            test -s "$SRC/$file"
+          done
           grep -Fq 'obj-$(CONFIG_BT_HCIBTUSB)' "$SRC/Makefile"
-          echo "Android common source: $(git rev-parse HEAD)"
+          echo "Pinned Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
           echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
 
       - name: Configure and build btusb plus helper modules
         shell: bash
         run: |
           set -euxo pipefail
-          SRC="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth"
+          SRC="$GITHUB_WORKSPACE/bluetooth-src"
           OUT="$GITHUB_WORKSPACE/out"
           mkdir -p "$OUT"
 
@@ -67,11 +65,11 @@ jobs:
           grep -Eq '^CONFIG_BT_INTEL=m$' "$KDIR/.config"
           grep -E '^CONFIG_BT_(HCIBTUSB|INTEL|BCM|RTL|MTK|QCA)=' "$KDIR/.config"
 
-          # Build from the actual Bluetooth source directory. Explicitly
-          # request btusb and the helper modules instead of relying on the
-          # directory-wide modules target, which may omit disabled entries.
+          # Isolated external-module Makefile avoids building unrelated
+          # Bluetooth transports from the full in-tree directory Makefile.
+          printf '%s\n' 'obj-m += btusb.o' 'obj-m += btintel.o' 'obj-m += btbcm.o' 'obj-m += btrtl.o' 'obj-m += btmtk.o' 'obj-m += btqca.o' > "$SRC/Makefile"
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
-          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 btusb.ko btintel.ko btbcm.ko btrtl.ko btmtk.ko btqca.ko V=1
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
 
           test -s "$SRC/btusb.ko"
           install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
