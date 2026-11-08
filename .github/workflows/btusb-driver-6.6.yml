@@ -30,8 +30,6 @@ jobs:
           grep -Eq '^CONFIG_BT=m$' "$KDIR/.config"
           grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config"
 
-          # The minimal DDK image contains the configured output/build tree,
-          # not the in-tree Bluetooth driver sources.
           git clone --no-checkout https://android.googlesource.com/kernel/common "$GITHUB_WORKSPACE/kernel-common"
           cd "$GITHUB_WORKSPACE/kernel-common"
           git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
@@ -41,6 +39,7 @@ jobs:
           test -s "$SRC/btusb.c"
           test -s "$SRC/Makefile"
           test -s "$SRC/btintel.h"
+          grep -Fq 'obj-$(CONFIG_BT_HCIBTUSB)' "$SRC/Makefile"
           echo "Android common source: $(git rev-parse HEAD)"
           echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
 
@@ -59,8 +58,6 @@ jobs:
           test -n "$scripts"
           test -x "$scripts"
 
-          # Enable the transport and its optional vendor helpers in the actual
-          # DDK config, then regenerate generated headers before compiling.
           for option in BT_HCIBTUSB BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA; do
             "$scripts" --file "$KDIR/.config" -m "$option"
           done
@@ -70,8 +67,11 @@ jobs:
           grep -Eq '^CONFIG_BT_INTEL=m$' "$KDIR/.config"
           grep -E '^CONFIG_BT_(HCIBTUSB|INTEL|BCM|RTL|MTK|QCA)=' "$KDIR/.config"
 
+          # Build from the actual Bluetooth source directory. Explicitly
+          # request btusb and the helper modules instead of relying on the
+          # directory-wide modules target, which may omit disabled entries.
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
-          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 btusb.ko btintel.ko btbcm.ko btrtl.ko btmtk.ko btqca.ko V=1
 
           test -s "$SRC/btusb.ko"
           install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
@@ -97,7 +97,7 @@ jobs:
             echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
             echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
             echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Helper modules are included when selected by the DDK config."
+            echo "Helper modules are included when built by the selected DDK config."
             echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
             echo "Build/package only; no device installation or module loading."
           } | tee out/README.txt
