@@ -1,0 +1,90 @@
+name: Build btusb Bluetooth USB Driver (Android 15 GKI 6.6)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/btusb-driver-6.6.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and validate btusb.ko
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+
+    steps:
+      - name: Check DDK kernel tree and Bluetooth prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${KDIR:-}" && test -f "$KDIR/Makefile" || {
+            echo "::error::DDK kernel build tree (KDIR) is unavailable."
+            exit 1
+          }
+          echo "KDIR=$KDIR"
+          echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          test -s "$KDIR/.config" || {
+            echo "::error::DDK kernel .config is missing."
+            exit 1
+          }
+          grep -E '^CONFIG_(BT|BT_BREDR|BT_HCIBTUSB|USB|FW_LOADER)' "$KDIR/.config" | sort || true
+          if ! grep -Eq '^CONFIG_BT(=y|=m)$' "$KDIR/.config"; then
+            echo "::error::CONFIG_BT is not enabled; btusb requires the Bluetooth core."
+            exit 1
+          fi
+          if ! grep -Eq '^CONFIG_USB(=y|=m)$' "$KDIR/.config"; then
+            echo "::error::CONFIG_USB is not enabled in the DDK config."
+            exit 1
+          fi
+
+      - name: Fetch btusb source from Linux v6.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch v6.6 https://github.com/torvalds/linux.git "$GITHUB_WORKSPACE/linux-source"
+          install -m 0644 "$GITHUB_WORKSPACE/linux-source/drivers/bluetooth/btusb.c" "$GITHUB_WORKSPACE/btusb.c"
+          grep -q 'MODULE_LICENSE' "$GITHUB_WORKSPACE/btusb.c"
+          grep -q 'module_usb_driver' "$GITHUB_WORKSPACE/btusb.c"
+
+      - name: Build btusb.ko against Android 15 DDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          printf 'obj-m += btusb.o\n' > "$GITHUB_WORKSPACE/Makefile"
+          make -C "$KDIR" M="$GITHUB_WORKSPACE" ARCH=arm64 LLVM=1 modules V=1
+          test -s "$GITHUB_WORKSPACE/btusb.ko"
+          install -m 0644 "$GITHUB_WORKSPACE/btusb.ko" "$GITHUB_WORKSPACE/out/btusb.ko"
+
+      - name: Validate module metadata and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/btusb.ko
+          modinfo out/btusb.ko | tee out/modinfo.txt
+          grep -q '^name: *btusb' out/modinfo.txt
+          modinfo -F vermagic out/btusb.ko | tee out/module-vermagic.txt
+          modinfo -F depends out/btusb.ko | tee out/module-depends.txt
+          llvm-readelf -h out/btusb.ko | grep -E 'Class:|Machine:'
+          {
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "Driver purpose: USB Bluetooth HCI adapters supported by btusb."
+            echo "Built against the DDK kernel, not the phone's exact 6.6.118 build."
+            echo "Check vermagic, symbol CRCs, Bluetooth core exports, firmware requirements and kernel config before attempting to load."
+            echo "Build/package only: this workflow does not install or load the module on a device."
+          } | tee out/README.txt
+          sha256sum out/btusb.ko | tee out/SHA256SUMS
+
+      - name: Upload btusb module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: btusb-android15-6.6
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
