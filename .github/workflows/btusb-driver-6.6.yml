@@ -18,66 +18,47 @@ jobs:
       image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
 
     steps:
-      - name: Check DDK kernel tree and Bluetooth prerequisites
+      - name: Check DDK kernel source and configuration
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${KDIR:-}" && test -f "$KDIR/Makefile" || {
-            echo "::error::DDK kernel build tree (KDIR) is unavailable."
+          : "${KDIR:?DDK KDIR is not set}"
+          : "${KERNEL_SRC:?DDK KERNEL_SRC is not set}"
+          test -f "$KDIR/Makefile"
+          test -f "$KERNEL_SRC/Makefile"
+          test -s "$KDIR/.config"
+          grep -Eq '^CONFIG_BT=m$' "$KDIR/.config"
+          grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config"
+          echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          echo "Kernel source: $KERNEL_SRC"
+          test -s "$KERNEL_SRC/drivers/bluetooth/btusb.c" || {
+            echo "::error::DDK-matched btusb.c not found in KERNEL_SRC."
             exit 1
           }
-          test -s "$KDIR/.config" || {
-            echo "::error::DDK kernel .config is missing."
-            exit 1
-          }
-          echo "KDIR=$KDIR"
-          echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-          grep -Eq '^CONFIG_BT=m$' "$KDIR/.config" || {
-            echo "::error::This workflow expects CONFIG_BT=m so Bluetooth core symbols can be resolved as modules."
-            exit 1
-          }
-          grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config" || {
-            echo "::error::CONFIG_USB is not enabled."
-            exit 1
-          }
-          grep -E '^CONFIG_(BT|BT_INTEL|BT_HCIBTUSB|BT_BCM|BT_RTL|BT_MTK|BT_QCA|USB|FW_LOADER)' "$KDIR/.config" | sort || true
 
-      - name: Fetch complete Linux v6.6 Bluetooth driver sources
+      - name: Build btusb using DDK-matched in-tree sources
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth=1 --branch v6.6 https://github.com/torvalds/linux.git "$GITHUB_WORKSPACE/linux-source"
-          SRC="$GITHUB_WORKSPACE/linux-source/drivers/bluetooth"
-          test -s "$SRC/btusb.c"
-          # btusb.c includes private sibling headers and has optional protocol helpers.
-          cp -a "$SRC/." "$GITHUB_WORKSPACE/btusb-src/"
-          test -s "$GITHUB_WORKSPACE/btusb-src/btintel.h"
-          test -s "$GITHUB_WORKSPACE/btusb-src/btintel.c"
-
-      - name: Build btusb and required Bluetooth helper objects
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC="$GITHUB_WORKSPACE/btusb-src"
+          SRC="$KERNEL_SRC/drivers/bluetooth"
           OUT="$GITHUB_WORKSPACE/out"
+          test -s "$SRC/btusb.c"
+          test -s "$SRC/Makefile"
+          test -s "$SRC/Kconfig"
           mkdir -p "$OUT"
-          cat > "$SRC/Makefile" <<'EOF'
-          obj-m += btusb.o
-          obj-m += btintel.o
-          obj-m += btbcm.o
-          obj-m += btrtl.o
-          obj-m += btmtk.o
-          obj-m += btqca.o
-          EOF
-          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
-          for module in btusb btintel btbcm btrtl btmtk btqca; do
+          # Use the driver's own Kbuild rules and the exact source/header set
+          # shipped with this Android 15 6.6 DDK, not upstream headers mixed
+          # with downstream Android Bluetooth headers.
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 CONFIG_BT_HCIBTUSB=m modules V=1
+          test -s "$SRC/btusb.ko"
+          install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
+          for module in btintel btbcm btrtl btmtk btqca; do
             if test -s "$SRC/$module.ko"; then
               install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
             fi
           done
-          test -s "$OUT/btusb.ko"
 
-      - name: Validate modules and package metadata
+      - name: Validate module and package metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -91,10 +72,9 @@ jobs:
             echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
             echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
             echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Also packaged any helper modules built from Linux v6.6 sources."
-            echo "This DDK build does not guarantee compatibility with the phone's exact 6.6.118 kernel."
-            echo "Before loading, compare vermagic, symbol CRCs, module dependencies, Bluetooth core exports, firmware requirements and kernel config."
-            echo "Build/package only: this workflow does not install or load modules on a device."
+            echo "Built using the DDK-matched in-tree Bluetooth sources."
+            echo "Compare vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
+            echo "Build/package only; no device installation or module loading."
           } | tee out/README.txt
           (cd out && sha256sum *.ko > SHA256SUMS)
 
