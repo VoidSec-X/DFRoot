@@ -25,28 +25,19 @@ jobs:
           set -euxo pipefail
           : "${KDIR:?DDK did not set KDIR}"
           : "${DDK_ROOT:?DDK_ROOT is not set}"
-          SRC="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth"
           git clone --depth=1 --filter=blob:none --sparse https://android.googlesource.com/kernel/common "$GITHUB_WORKSPACE/kernel-common"
           cd "$GITHUB_WORKSPACE/kernel-common"
           git sparse-checkout set drivers/bluetooth
           git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
           git checkout --detach FETCH_HEAD
-          test -s "$SRC/btusb.c"
-          test -s "$SRC/Makefile"
-          test -s "$SRC/btintel.h"
-          test -s "$SRC/btintel.c"
-          test -s "$SRC/btbcm.h"
-          test -s "$SRC/btbcm.c"
-          test -s "$SRC/btrtl.h"
-          test -s "$SRC/btrtl.c"
-          test -s "$SRC/btmtk.h"
-          test -s "$SRC/btmtk.c"
-          test -s "$SRC/btqca.h"
-          test -s "$SRC/btqca.c"
-          echo "Android common source: $(git rev-parse HEAD)"
+          SRC="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth"
+          for file in btusb.c btintel.c btintel.h btbcm.c btbcm.h btrtl.c btrtl.h btmtk.c btmtk.h btqca.c btqca.h; do
+            test -s "$SRC/$file"
+          done
+          echo "Pinned Android common source: $(git rev-parse HEAD)"
           echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
 
-      - name: Configure and build btusb plus required helpers
+      - name: Configure and build btusb plus helpers
         shell: bash
         run: |
           set -euxo pipefail
@@ -58,180 +49,30 @@ jobs:
             scripts="$(find "$DDK_ROOT/src" -path '*/scripts/config' -type f -executable -print -quit)"
           fi
           test -x "$scripts"
-          for option in BT_HCIBTUSB BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA; do
-            "$scripts" --file "$KDIR/.config" -m "$option"
-          done
+          "$scripts" --file "$KDIR/.config" -e BT
+          "$scripts" --file "$KDIR/.config" -e USB
           make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
-          grep -Eq '^CONFIG_BT_HCIBTUSB=m          install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
-          for module in btintel btbcm btrtl btmtk btqca; do
-            if test -s "$SRC/$module.ko"; then
-              install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
-            fi
-          done
+          grep -Eq '^CONFIG_BT=y$|^CONFIG_BT=m$' "$KDIR/.config"
+          grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config"
 
-      - name: Validate module metadata and ARM64 ELF
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s out/btusb.ko
-          file out/*.ko
-          for module in out/*.ko; do
-            modinfo "$module" | tee "out/$(basename "$module").modinfo.txt"
-            modinfo -F vermagic "$module"
-            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
-          done
-          {
-            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
-            echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
-            echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-            echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Helper modules are built from the same pinned source tree."
-            echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
-            echo "Build/package only; no device installation or module loading."
-          } | tee out/README.txt
-          (cd out && sha256sum *.ko > SHA256SUMS)
-
-      - name: Upload Bluetooth USB driver artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: btusb-android15-6.6
-          path: out/
-          if-no-files-found: error
-          retention-days: 14
- "$KDIR/.config"
-          grep -Eq '^CONFIG_BT_INTEL=m          install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
-          for module in btintel btbcm btrtl btmtk btqca; do
-            if test -s "$SRC/$module.ko"; then
-              install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
-            fi
-          done
-
-      - name: Validate module metadata and ARM64 ELF
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s out/btusb.ko
-          file out/*.ko
-          for module in out/*.ko; do
-            modinfo "$module" | tee "out/$(basename "$module").modinfo.txt"
-            modinfo -F vermagic "$module"
-            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
-          done
-          {
-            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
-            echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
-            echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-            echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Helper modules are built from the same pinned source tree."
-            echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
-            echo "Build/package only; no device installation or module loading."
-          } | tee out/README.txt
-          (cd out && sha256sum *.ko > SHA256SUMS)
-
-      - name: Upload Bluetooth USB driver artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: btusb-android15-6.6
-          path: out/
-          if-no-files-found: error
-          retention-days: 14
- "$KDIR/.config"
-          grep -Eq '^CONFIG_BT=m          install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
-          for module in btintel btbcm btrtl btmtk btqca; do
-            if test -s "$SRC/$module.ko"; then
-              install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
-            fi
-          done
-
-      - name: Validate module metadata and ARM64 ELF
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s out/btusb.ko
-          file out/*.ko
-          for module in out/*.ko; do
-            modinfo "$module" | tee "out/$(basename "$module").modinfo.txt"
-            modinfo -F vermagic "$module"
-            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
-          done
-          {
-            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
-            echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
-            echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-            echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Helper modules are built from the same pinned source tree."
-            echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
-            echo "Build/package only; no device installation or module loading."
-          } | tee out/README.txt
-          (cd out && sha256sum *.ko > SHA256SUMS)
-
-      - name: Upload Bluetooth USB driver artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: btusb-android15-6.6
-          path: out/
-          if-no-files-found: error
-          retention-days: 14
- "$KDIR/.config"
-          grep -Eq '^CONFIG_USB=(y|m)          install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
-          for module in btintel btbcm btrtl btmtk btqca; do
-            if test -s "$SRC/$module.ko"; then
-              install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
-            fi
-          done
-
-      - name: Validate module metadata and ARM64 ELF
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s out/btusb.ko
-          file out/*.ko
-          for module in out/*.ko; do
-            modinfo "$module" | tee "out/$(basename "$module").modinfo.txt"
-            modinfo -F vermagic "$module"
-            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
-          done
-          {
-            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
-            echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
-            echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-            echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Helper modules are built from the same pinned source tree."
-            echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
-            echo "Build/package only; no device installation or module loading."
-          } | tee out/README.txt
-          (cd out && sha256sum *.ko > SHA256SUMS)
-
-      - name: Upload Bluetooth USB driver artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: btusb-android15-6.6
-          path: out/
-          if-no-files-found: error
-          retention-days: 14
- "$KDIR/.config"
-          grep -Fq 'obj-$(CONFIG_BT_HCIBTUSB)' "$SRC/Makefile"
-
-          # Confirm the in-tree make expansion selects btusb before compiling.
-          echo "Final Bluetooth USB config:"
-          grep -E '^CONFIG_(BT|BT_HCIBTUSB|BT_INTEL|USB)=' "$KDIR/.config"
-          echo "Bluetooth Makefile btusb rule:"
-          grep -F 'obj-$(CONFIG_BT_HCIBTUSB)' "$SRC/Makefile"
-
+          # External-module builds require obj-m entries. The in-tree
+          # Bluetooth Makefile is driven by Kconfig symbols and was omitting
+          # btusb from this DDK's effective module target list.
+          cat > "$SRC/Makefile" <<'EOF'
+          obj-m += btusb.o
+          obj-m += btintel.o
+          obj-m += btbcm.o
+          obj-m += btrtl.o
+          obj-m += btmtk.o
+          obj-m += btqca.o
+          EOF
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
-          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1 2>&1 | tee "$OUT/build.log"
-          if ! test -s "$SRC/btusb.ko"; then
-            echo "::error::btusb.ko was not emitted. Effective config and Kbuild target list:"
-            grep -E '^CONFIG_(BT|BT_HCIBTUSB|USB)=' "$KDIR/.config" || true
-            grep -E 'btusb|modules.order' "$SRC/modules.order" "$OUT/build.log" || true
-            find "$SRC" -maxdepth 1 -type f -name '*btusb*' -ls
-            exit 1
-          fi
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
+          test -s "$SRC/btusb.ko"
           install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
           for module in btintel btbcm btrtl btmtk btqca; do
-            if test -s "$SRC/$module.ko"; then
-              install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
-            fi
+            test -s "$SRC/$module.ko"
+            install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
           done
 
       - name: Validate module metadata and ARM64 ELF
@@ -250,8 +91,8 @@ jobs:
             echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
             echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
             echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Helper modules are built from the same pinned source tree."
-            echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
+            echo "Helper modules built from the same pinned source tree."
+            echo "Check exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
             echo "Build/package only; no device installation or module loading."
           } | tee out/README.txt
           (cd out && sha256sum *.ko > SHA256SUMS)
