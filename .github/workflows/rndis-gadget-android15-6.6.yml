@@ -1,0 +1,98 @@
+name: Build RNDIS USB Gadget Modules (Android 15 GKI 6.6)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/rndis-gadget-android15-6.6.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and validate RNDIS gadget modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+      options: --privileged
+
+    steps:
+      - name: Check DDK and required USB gadget configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+          : "${KDIR:?DDK did not set KDIR}"
+          test -f "$KDIR/Makefile"
+          test -s "$KDIR/.config"
+          echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          grep -E '^CONFIG_(USB|USB_GADGET|USB_CONFIGFS|USB_CONFIGFS_RNDIS|USB_LIBCOMPOSITE|USB_U_ETHER|USB_F_RNDIS|NET|INET)=' "$KDIR/.config" | sort || true
+          for symbol in CONFIG_USB CONFIG_USB_GADGET CONFIG_USB_CONFIGFS CONFIG_USB_CONFIGFS_RNDIS CONFIG_USB_LIBCOMPOSITE CONFIG_USB_U_ETHER CONFIG_USB_F_RNDIS CONFIG_NET CONFIG_INET; do
+            grep -qE "^(${symbol}=y|${symbol}=m)$" "$KDIR/.config" || {
+              echo "::error::Required kernel option $symbol is disabled in the DDK config."
+              exit 1
+            }
+          done
+
+      - name: Fetch pinned Linux v6.6 USB gadget sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 --filter=blob:none --sparse --branch v6.6 https://github.com/torvalds/linux.git "$GITHUB_WORKSPACE/linux-source"
+          cd "$GITHUB_WORKSPACE/linux-source"
+          git sparse-checkout set drivers/usb/gadget
+          SRC="$GITHUB_WORKSPACE/linux-source/drivers/usb/gadget"
+          for file in function/f_rndis.c function/u_ether.c composite.c configfs.c; do
+            test -s "$SRC/$file"
+          done
+          echo "Linux source commit: $(git rev-parse HEAD)"
+
+      - name: Build RNDIS function, Ethernet and composite modules
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SRC="$GITHUB_WORKSPACE/linux-source/drivers/usb/gadget"
+          OUT="$GITHUB_WORKSPACE/out"
+          mkdir -p "$OUT"
+          cat > "$SRC/Makefile" <<'EOF'
+          obj-m += libcomposite.o
+          obj-m += u_ether.o
+          obj-m += usb_f_rndis.o
+          EOF
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
+          for module in libcomposite u_ether usb_f_rndis; do
+            test -s "$SRC/$module.ko"
+            install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
+          done
+
+      - name: Validate module metadata and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in out/*.ko; do
+            file "$module"
+            modinfo "$module" | tee "out/$(basename "$module").modinfo.txt"
+            modinfo -F vermagic "$module"
+            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
+          done
+          {
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Source: Linux v6.6 USB gadget subsystem"
+            echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "Modules: libcomposite.ko, u_ether.ko, usb_f_rndis.ko"
+            echo "Purpose: USB RNDIS gadget function; not a USB host RNDIS NIC driver."
+            echo "A working RNDIS gadget also needs a UDC, configfs gadget setup, Android USB gadget integration and compatible kernel configuration."
+            echo "Build/package only; no device installation or module loading."
+            echo "Check exact device vermagic, symbol CRCs, dependencies and exported symbols before loading."
+          } | tee out/README.txt
+          (cd out && sha256sum *.ko > SHA256SUMS)
+
+      - name: Upload RNDIS gadget modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: rndis-gadget-android15-6.6
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
