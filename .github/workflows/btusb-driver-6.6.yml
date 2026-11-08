@@ -57,10 +57,17 @@ jobs:
           # unless CONFIG_BT_INTEL is enabled. Enable Intel helper support so
           # the callback used by btusb is declared and built in the same tree.
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
-          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 \
-            CONFIG_BT=m CONFIG_BT_HCIBTUSB=m CONFIG_BT_INTEL=m \
-            CONFIG_BT_BCM=m CONFIG_BT_RTL=m CONFIG_BT_MTK=m CONFIG_BT_QCA=m \
-            modules V=1
+          # External-module make variables do not rewrite the kernel's
+          # generated autoconf header. Enable the matching optional helper
+          # configs in the DDK .config, regenerate headers, then build.
+          scripts="$KDIR/scripts/config"
+          test -x "$scripts"
+          for option in BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA; do
+            "$scripts" --file "$KDIR/.config" -m "$option"
+          done
+          make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
+          grep -E '^CONFIG_BT_(INTEL|BCM|RTL|MTK|QCA)=' "$KDIR/.config" || true
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
 
           test -s "$SRC/btusb.ko"
           install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
