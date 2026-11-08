@@ -45,7 +45,8 @@ jobs:
           git clone --depth=1 --branch v6.6 https://github.com/torvalds/linux.git "$GITHUB_WORKSPACE/linux-source"
           install -m 0644 "$GITHUB_WORKSPACE/linux-source/drivers/usb/serial/pl2303.c" "$GITHUB_WORKSPACE/pl2303.c"
           grep -q 'MODULE_LICENSE' "$GITHUB_WORKSPACE/pl2303.c"
-          grep -q 'usb_serial_register' "$GITHUB_WORKSPACE/pl2303.c"
+          grep -q 'module_usb_serial_driver' "$GITHUB_WORKSPACE/pl2303.c"
+          grep -q '#include <linux/usb/serial.h>' "$GITHUB_WORKSPACE/pl2303.c"
 
       - name: Build pl2303.ko against Android 15 DDK
         shell: bash
