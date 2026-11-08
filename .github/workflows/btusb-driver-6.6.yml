@@ -60,8 +60,11 @@ jobs:
           # External-module make variables do not rewrite the kernel's
           # generated autoconf header. Enable the matching optional helper
           # configs in the DDK .config, regenerate headers, then build.
-          scripts="$KDIR/scripts/config"
-          test -x "$scripts"
+          scripts="$DDK_ROOT/src/android15-6.6/scripts/config"
+          if [ ! -x "$scripts" ]; then
+            scripts="$(find "$DDK_ROOT/src" -path '*/scripts/config' -type f -executable -print -quit)"
+          fi
+          test -n "$scripts" && test -x "$scripts"
           for option in BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA; do
             "$scripts" --file "$KDIR/.config" -m "$option"
           done
