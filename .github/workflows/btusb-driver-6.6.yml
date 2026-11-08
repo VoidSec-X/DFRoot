@@ -65,11 +65,51 @@ jobs:
             scripts="$(find "$DDK_ROOT/src" -path '*/scripts/config' -type f -executable -print -quit)"
           fi
           test -n "$scripts" && test -x "$scripts"
-          for option in BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA; do
+          for option in BT_HCIBTUSB BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA; do
             "$scripts" --file "$KDIR/.config" -m "$option"
           done
           make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
-          grep -E '^CONFIG_BT_(INTEL|BCM|RTL|MTK|QCA)=' "$KDIR/.config" || true
+          grep -E '^CONFIG_BT_(HCIBTUSB|INTEL|BCM|RTL|MTK|QCA)=' "$KDIR/.config"
+          grep -q '^CONFIG_BT_HCIBTUSB=m
+
+          test -s "$SRC/btusb.ko"
+          install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
+          for module in btintel btbcm btrtl btmtk btqca; do
+            if test -s "$SRC/$module.ko"; then
+              install -m 0644 "$SRC/$module.ko" "$OUT/$module.ko"
+            fi
+          done
+
+      - name: Validate module metadata and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s out/btusb.ko
+          file out/*.ko
+          for module in out/*.ko; do
+            modinfo "$module" | tee "out/$(basename "$module").modinfo.txt"
+            modinfo -F vermagic "$module"
+            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
+          done
+          {
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
+            echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
+            echo "Helper modules are included when built by the in-tree Kbuild graph."
+            echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
+            echo "Build/package only; no device installation or module loading."
+          } | tee out/README.txt
+          (cd out && sha256sum *.ko > SHA256SUMS)
+
+      - name: Upload Bluetooth USB driver artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: btusb-android15-6.6
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+ "$KDIR/.config"
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
 
           test -s "$SRC/btusb.ko"
