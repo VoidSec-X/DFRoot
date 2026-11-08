@@ -70,8 +70,8 @@ jobs:
           git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
           git checkout --detach FETCH_HEAD
           G="$GITHUB_WORKSPACE/kernel-common/drivers/usb/gadget"
-          F="$G/$function"
-          for file in "$G/Kconfig" "$G/Makefile" "$G/composite.c" "$G/configfs.c" "$G/functions.c" "$G/usbstring.c" "$G/config.c" "$G/epautoconf.c" "$G/u_f.c" "$F/Makefile" "$F/f_rndis.c" "$F/rndis.c" "$F/u_ether.c" "$F/u_ether.h" "$F/rndis.h" "$F/u_rndis.h" "$F/ndis.h" "$F/configfs.h" "$F/u_ether_configfs.h"; do
+          F="$G/function"
+          for file in "$G/Kconfig" "$G/Makefile" "$G/composite.c" "$G/configfs.c" "$G/functions.c" "$G/usbstring.c" "$G/config.c" "$G/epautoconf.c" "$G/u_f.c" "$G/configfs.h" "$F/Makefile" "$F/f_rndis.c" "$F/rndis.c" "$F/u_ether.c" "$F/u_ether.h" "$F/rndis.h" "$F/u_rndis.h" "$F/ndis.h" "$F/u_ether_configfs.h"; do
             test -s "$file"
           done
           echo "Pinned source commit: $(git rev-parse HEAD)"
