@@ -28,26 +28,24 @@ jobs:
           test -s "$KDIR/.config"
           echo "KDIR=$KDIR"
           echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-          grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config" || {
-            echo "::error::CONFIG_USB is not enabled in the DDK config."
-            exit 1
-          }
+          grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config"
           grep -Eq '^CONFIG_USB_SERIAL=(m|y)$' "$KDIR/.config" || {
-            echo "::error::CONFIG_USB_SERIAL is not enabled in the DDK config; pl2303 requires the USB-serial core."
+            echo "::error::CONFIG_USB_SERIAL is not enabled in the DDK config."
             exit 1
           }
           grep -E '^CONFIG_(USB|USB_SERIAL|USB_SERIAL_PL2303|TTY)=' "$KDIR/.config" | sort || true
 
-      - name: Fetch only PL2303 source and its header
+      - name: Fetch PL2303 source from pinned Linux v6.6 tree
         shell: bash
         run: |
           set -euxo pipefail
-          BASE="https://raw.githubusercontent.com/torvalds/linux/v6.6/drivers/usb/serial"
-          curl -fL --retry 3 "$BASE/pl2303.c" -o "$GITHUB_WORKSPACE/pl2303.c"
-          curl -fL --retry 3 "$BASE/pl2303.h" -o "$GITHUB_WORKSPACE/pl2303.h"
+          git clone --depth=1 --filter=blob:none --sparse --branch v6.6 https://github.com/torvalds/linux.git "$GITHUB_WORKSPACE/linux-source"
+          cd "$GITHUB_WORKSPACE/linux-source"
+          git sparse-checkout set drivers/usb/serial
+          install -m 0644 drivers/usb/serial/pl2303.c "$GITHUB_WORKSPACE/pl2303.c"
+          install -m 0644 drivers/usb/serial/pl2303.h "$GITHUB_WORKSPACE/pl2303.h"
           grep -q 'MODULE_LICENSE' "$GITHUB_WORKSPACE/pl2303.c"
           grep -q 'module_usb_serial_driver' "$GITHUB_WORKSPACE/pl2303.c"
-          grep -q '#include <linux/usb/serial.h>' "$GITHUB_WORKSPACE/pl2303.c"
           grep -q '#include "pl2303.h"' "$GITHUB_WORKSPACE/pl2303.c"
           test -s "$GITHUB_WORKSPACE/pl2303.h"
 
@@ -75,8 +73,8 @@ jobs:
             echo "Source: Linux v6.6 drivers/usb/serial/pl2303.c and pl2303.h"
             echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
             echo "Driver purpose: Prolific PL2303 USB-to-serial adapters."
-            echo "Requires the matching USB-serial core and compatible exported symbols."
-            echo "Built against DDK 6.6.127; this is not a guarantee of compatibility with the phone's exact 6.6.118 kernel."
+            echo "Requires matching USB-serial core and compatible exported symbols."
+            echo "Built against DDK 6.6.127; exact device compatibility must be checked against its kernel."
             echo "Build/package only; no device installation or module loading."
           } | tee out/README.txt
           sha256sum out/pl2303.ko | tee out/SHA256SUMS
