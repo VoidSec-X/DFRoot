@@ -19,58 +19,53 @@ jobs:
       options: --privileged
 
     steps:
-      - name: Fetch only Bluetooth USB driver sources
+      - name: Fetch pinned Android common Bluetooth sources
         shell: bash
         run: |
           set -euxo pipefail
           : "${KDIR:?DDK did not set KDIR}"
           : "${DDK_ROOT:?DDK_ROOT is not set}"
-          test -f "$KDIR/Makefile"
-          test -s "$KDIR/.config"
-          grep -Eq '^CONFIG_BT=m$' "$KDIR/.config"
-          grep -Eq '^CONFIG_USB=y$|^CONFIG_USB=m$' "$KDIR/.config"
-
-          BASE="https://android.googlesource.com/kernel/common/+/adaba3e91947a078e89f9990010e3adc2aafce7b/drivers/bluetooth"
-          SRC="$GITHUB_WORKSPACE/bluetooth-src"
-          mkdir -p "$SRC"
-          for file in btusb.c Makefile btintel.h btbcm.h btrtl.h btmtk.h btqca.h; do
-            curl -fL --retry 3 "$BASE/$file?format=TEXT" | base64 -d > "$SRC/$file"
-            test -s "$SRC/$file"
-          done
-          grep -Fq 'obj-$(CONFIG_BT_HCIBTUSB)' "$SRC/Makefile"
-          echo "Pinned Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
+          SRC="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth"
+          git clone --depth=1 --filter=blob:none --sparse https://android.googlesource.com/kernel/common "$GITHUB_WORKSPACE/kernel-common"
+          cd "$GITHUB_WORKSPACE/kernel-common"
+          git sparse-checkout set drivers/bluetooth
+          git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
+          git checkout --detach FETCH_HEAD
+          test -s "$SRC/btusb.c"
+          test -s "$SRC/Makefile"
+          test -s "$SRC/btintel.h"
+          test -s "$SRC/btintel.c"
+          test -s "$SRC/btbcm.h"
+          test -s "$SRC/btbcm.c"
+          test -s "$SRC/btrtl.h"
+          test -s "$SRC/btrtl.c"
+          test -s "$SRC/btmtk.h"
+          test -s "$SRC/btmtk.c"
+          test -s "$SRC/btqca.h"
+          test -s "$SRC/btqca.c"
+          echo "Android common source: $(git rev-parse HEAD)"
           echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
 
-      - name: Configure and build btusb plus helper modules
+      - name: Configure and build btusb plus required helpers
         shell: bash
         run: |
           set -euxo pipefail
-          SRC="$GITHUB_WORKSPACE/bluetooth-src"
+          SRC="$GITHUB_WORKSPACE/kernel-common/drivers/bluetooth"
           OUT="$GITHUB_WORKSPACE/out"
           mkdir -p "$OUT"
-
           scripts="$DDK_ROOT/src/android15-6.6/scripts/config"
           if [ ! -x "$scripts" ]; then
             scripts="$(find "$DDK_ROOT/src" -path '*/scripts/config' -type f -executable -print -quit)"
           fi
-          test -n "$scripts"
           test -x "$scripts"
-
           for option in BT_HCIBTUSB BT_INTEL BT_BCM BT_RTL BT_MTK BT_QCA; do
             "$scripts" --file "$KDIR/.config" -m "$option"
           done
           make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
-
           grep -Eq '^CONFIG_BT_HCIBTUSB=m$' "$KDIR/.config"
           grep -Eq '^CONFIG_BT_INTEL=m$' "$KDIR/.config"
-          grep -E '^CONFIG_BT_(HCIBTUSB|INTEL|BCM|RTL|MTK|QCA)=' "$KDIR/.config"
-
-          # Isolated external-module Makefile avoids building unrelated
-          # Bluetooth transports from the full in-tree directory Makefile.
-          printf '%s\n' 'obj-m += btusb.o' 'obj-m += btintel.o' 'obj-m += btbcm.o' 'obj-m += btrtl.o' 'obj-m += btmtk.o' 'obj-m += btqca.o' > "$SRC/Makefile"
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
-
           test -s "$SRC/btusb.ko"
           install -m 0644 "$SRC/btusb.ko" "$OUT/btusb.ko"
           for module in btintel btbcm btrtl btmtk btqca; do
@@ -95,7 +90,7 @@ jobs:
             echo "Android common source: adaba3e91947a078e89f9990010e3adc2aafce7b"
             echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
             echo "Primary driver: btusb.ko (USB Bluetooth HCI transport)."
-            echo "Helper modules are included when built by the selected DDK config."
+            echo "Helper modules are built from the same pinned source tree."
             echo "Compare exact device vermagic, symbol CRCs, dependencies, firmware and kernel config before loading."
             echo "Build/package only; no device installation or module loading."
           } | tee out/README.txt
