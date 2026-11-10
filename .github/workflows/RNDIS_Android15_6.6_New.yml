@@ -64,12 +64,11 @@ jobs:
           F="$G/function"
           OUT="$GITHUB_WORKSPACE/out"
 
-          # The DDK kernel already exports the composite gadget framework.
-          # Do not rebuild libcomposite: modpost correctly rejects duplicate
-          # exports that are already present in vmlinux.
+          # DDK already provides libcomposite and u_ether through vmlinux.
+          # Build only the RNDIS function object; do not generate duplicate
+          # framework/helper modules with symbols already exported by vmlinux.
           cat > "$F/Makefile" <<'EOF'
           ccflags-y += -I$(src)/.. -I$(src)/../udc
-          obj-m += u_ether.o
           obj-m += usb_f_rndis.o
           usb_f_rndis-y := f_rndis.o rndis.o
           EOF
@@ -77,10 +76,11 @@ jobs:
           make -C "$KDIR" M="$F" ARCH=arm64 LLVM=1 clean
           make -C "$KDIR" M="$F" ARCH=arm64 LLVM=1 modules V=1
 
-          for module in "$F/u_ether.ko" "$F/usb_f_rndis.ko"; do
-            test -s "$module"
-            install -m 0644 "$module" "$OUT/"
-          done
+          test -s "$F/usb_f_rndis.ko"
+          install -m 0644 "$F/usb_f_rndis.ko" "$OUT/"
+          # Ensure the produced RNDIS module resolves gadget framework helpers
+          # from the target kernel rather than shipping duplicate providers.
+          nm -u "$OUT/usb_f_rndis.ko" | tee "$OUT/undefined-symbols.txt"
 
       - name: Validate module files
         shell: bash
@@ -98,7 +98,7 @@ jobs:
             echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
             echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
             echo "Android common source commit: $(cat out/SOURCE_COMMIT.txt)"
-            echo "Artifacts: u_ether.ko, usb_f_rndis.ko"
+            echo "Artifact: usb_f_rndis.ko (framework and Ethernet helpers are supplied by the DDK kernel)"
             echo "Build/package only. Loading requires matching kernel config, exported symbols, symbol CRCs and ABI."
             echo "The DDK kernel release may differ from the device kernel release."
           } | tee out/README.txt
