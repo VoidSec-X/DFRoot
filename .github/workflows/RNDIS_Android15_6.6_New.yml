@@ -1,0 +1,119 @@
+name: Build RNDIS Modules (Android 15 GKI 6.6) - Separate
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/RNDIS_Android15_6.6_New.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-rndis:
+    name: Build RNDIS gadget modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+
+    steps:
+      - name: Check DDK build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${KDIR:?DDK did not set KDIR}"
+          test -f "$KDIR/Makefile"
+          test -s "$KDIR/.config"
+          echo "KDIR=$KDIR"
+          echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+
+      - name: Fetch matching Android common USB gadget sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --filter=blob:none --sparse https://android.googlesource.com/kernel/common "$GITHUB_WORKSPACE/kernel-common"
+          cd "$GITHUB_WORKSPACE/kernel-common"
+          git sparse-checkout set drivers/usb/gadget
+          git fetch --depth=1 origin adaba3e91947a078e89f9990010e3adc2aafce7b
+          git checkout --detach FETCH_HEAD
+          G="$GITHUB_WORKSPACE/kernel-common/drivers/usb/gadget"
+          F="$G/function"
+          for f in "$G/composite.c" "$G/config.c" "$G/epautoconf.c" "$G/functions.c" "$G/configfs.c" "$G/usbstring.c" "$G/u_f.c" "$G/configfs.h" "$F/f_rndis.c" "$F/rndis.c" "$F/u_ether.c" "$F/u_ether.h" "$F/rndis.h" "$F/u_rndis.h" "$F/ndis.h"; do
+            test -s "$f"
+          done
+          echo "$(git rev-parse HEAD)" | tee "$GITHUB_WORKSPACE/out/SOURCE_COMMIT.txt"
+
+      - name: Check required kernel configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -E '^CONFIG_(USB_GADGET|USB_CONFIGFS|USB_CONFIGFS_RNDIS|USB_F_RNDIS|USB_LIBCOMPOSITE)=' "$KDIR/.config" || true
+          for sym in USB_GADGET USB_LIBCOMPOSITE USB_CONFIGFS USB_CONFIGFS_RNDIS; do
+            if ! grep -Eq "^CONFIG_${sym}=(m|y)$" "$KDIR/.config"; then
+              echo "::warning::CONFIG_${sym} is not enabled in the DDK config; external object compilation may not provide all required gadget integration."
+            fi
+          done
+
+      - name: Build external gadget modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          G="$GITHUB_WORKSPACE/kernel-common/drivers/usb/gadget"
+          F="$G/function"
+          OUT="$GITHUB_WORKSPACE/out"
+
+          # Compile the composite framework and RNDIS function against the
+          # existing DDK kernel build tree and its symbol/version metadata.
+          cat > "$G/Makefile" <<'EOF'
+          ccflags-y += -I$(src) -I$(src)/function -I$(src)/udc
+          obj-m += libcomposite.o
+          libcomposite-y := usbstring.o config.o epautoconf.o composite.o functions.o configfs.o u_f.o
+          EOF
+
+          cat > "$F/Makefile" <<'EOF'
+          ccflags-y += -I$(src)/.. -I$(src)/../udc
+          obj-m += u_ether.o
+          obj-m += usb_f_rndis.o
+          usb_f_rndis-y := f_rndis.o rndis.o
+          EOF
+
+          make -C "$KDIR" M="$G" ARCH=arm64 LLVM=1 clean
+          make -C "$KDIR" M="$G" ARCH=arm64 LLVM=1 modules V=1
+          make -C "$KDIR" M="$F" ARCH=arm64 LLVM=1 clean
+          make -C "$KDIR" M="$F" ARCH=arm64 LLVM=1 modules V=1
+
+          for module in "$G/libcomposite.ko" "$F/u_ether.ko" "$F/usb_f_rndis.ko"; do
+            test -s "$module"
+            install -m 0644 "$module" "$OUT/"
+          done
+
+      - name: Validate module files
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in out/*.ko; do
+            echo "===== $module ====="
+            file "$module"
+            modinfo "$module" | tee "out/$(basename "$module").modinfo.txt"
+            modinfo -F vermagic "$module"
+            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
+          done
+          (cd out && sha256sum *.ko > SHA256SUMS)
+          {
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "Android common source commit: $(cat out/SOURCE_COMMIT.txt)"
+            echo "Artifacts: libcomposite.ko, u_ether.ko, usb_f_rndis.ko"
+            echo "Build/package only. Loading requires matching kernel config, exported symbols, symbol CRCs and ABI."
+            echo "The DDK kernel release may differ from the device kernel release."
+          } | tee out/README.txt
+
+      - name: Upload RNDIS module artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rndis-android15-6.6-separate
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
