@@ -1,0 +1,100 @@
+name: Build CH341 USB-SPI Driver (Android 15 GKI 6.6)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ch341-spi-driver-6.6.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and validate spi-ch341-usb.ko
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+
+    steps:
+      - name: Check Android 15 DDK build tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${KDIR:?DDK kernel build tree (KDIR) is unavailable}"
+          test -f "$KDIR/Makefile"
+          test -s "$KDIR/.config"
+          echo "KDIR=$KDIR"
+          echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          grep -E '^CONFIG_(USB|SPI|GPIOLIB|USB_SERIAL)=' "$KDIR/.config" | sort || true
+          grep -Eq '^CONFIG_USB=(y|m)$' "$KDIR/.config" || {
+            echo "::error::USB host support is not enabled in the DDK config."
+            exit 1
+          }
+          grep -Eq '^CONFIG_SPI=(y|m)$' "$KDIR/.config" || {
+            echo "::error::SPI framework is not enabled in the DDK config."
+            exit 1
+          }
+
+      - name: Fetch CH341 USB-SPI driver source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/gschorcht/spi-ch341-usb.git "$GITHUB_WORKSPACE/spi-ch341-usb"
+          cd "$GITHUB_WORKSPACE/spi-ch341-usb"
+          echo "Driver source revision: $(git rev-parse HEAD)"
+          find . -maxdepth 2 -type f -print | sort
+          test -s Makefile
+          grep -R -q 'MODULE_LICENSE' .
+
+      - name: Build SPI driver against Android 15 DDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/spi-ch341-usb"
+          OUT="$GITHUB_WORKSPACE/out"
+          mkdir -p "$OUT"
+
+          # Build the driver's own out-of-tree module target using the
+          # Android 15 / 6.6 DDK headers and generated configuration.
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
+
+          mapfile -t KOS < <(find "$SRC" -maxdepth 2 -type f -name '*.ko' -print)
+          if [ "${#KOS[@]}" -ne 1 ]; then
+            printf 'Expected exactly one .ko from the CH341 SPI driver, found %s\n' "${#KOS[@]}"
+            find "$SRC" -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          install -m 0644 "${KOS[0]}" "$OUT/spi-ch341-usb.ko"
+
+      - name: Validate module metadata and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/spi-ch341-usb.ko
+          modinfo out/spi-ch341-usb.ko | tee out/modinfo.txt
+          modinfo -F vermagic out/spi-ch341-usb.ko | tee out/module-vermagic.txt
+          llvm-readelf -h out/spi-ch341-usb.ko | grep -E 'Class:|Machine:'
+          grep -Eq 'Machine:.*AArch64' < <(llvm-readelf -h out/spi-ch341-usb.ko)
+          {
+            echo "Driver: CH341 USB-to-SPI adapter (not the CH341 USB-serial driver)."
+            echo "Source: https://github.com/gschorcht/spi-ch341-usb"
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "Build/package only: this workflow does not install or load the module."
+            echo "The DDK vermagic and symbol CRCs may differ from the phone's exact 6.6.118 kernel."
+            echo "Check USB/SPI config, dependencies, exported symbols and vermagic before loading."
+            echo "This module does not create a native spidev device automatically; verify the driver's registered interfaces."
+          } | tee out/README.txt
+          sha256sum out/spi-ch341-usb.ko | tee out/SHA256SUMS
+
+      - name: Upload CH341 SPI module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spi-ch341-usb-android15-6.6
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
