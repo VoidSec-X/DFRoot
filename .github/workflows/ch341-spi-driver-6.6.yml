@@ -11,134 +11,95 @@ permissions:
 
 jobs:
   build:
-    name: Build and validate spi-ch341-usb.ko
+    name: Build and validate spi-ch341.ko
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
     container:
+      # Keep the exact same DDK image used by ch341-driver-6.6.yml.
       image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
 
     steps:
-      - name: Check Android 15 DDK build tree
+      - name: Check DDK kernel build tree and USB/SPI core
         shell: bash
         run: |
           set -euo pipefail
-          : "${KDIR:?DDK kernel build tree (KDIR) is unavailable}"
-          test -f "$KDIR/Makefile"
+          test -n "${KDIR:-}" && test -f "$KDIR/Makefile" || {
+            echo "::error::DDK kernel build tree (KDIR) is unavailable."
+            exit 1
+          }
           test -s "$KDIR/.config"
           echo "KDIR=$KDIR"
           echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-          grep -E '^CONFIG_(USB|SPI|GPIOLIB)=' "$KDIR/.config" | sort || true
-          grep -Eq '^CONFIG_USB=(y|m)$' "$KDIR/.config"
-          grep -Eq '^CONFIG_SPI=(y|m)$' "$KDIR/.config"
-          grep -Eq '^CONFIG_GPIOLIB=(y|m)$' "$KDIR/.config"
+          grep -E '^CONFIG_(USB|SPI|SPI_MASTER)=' "$KDIR/.config" | sort || true
+          grep -Eq '^CONFIG_USB=(y|m)$' "$KDIR/.config" || {
+            echo "::error::USB support is not enabled in the DDK config."
+            exit 1
+          }
+          grep -Eq '^CONFIG_SPI=y$' "$KDIR/.config" || {
+            echo "::error::CONFIG_SPI is not enabled in the DDK config."
+            exit 1
+          }
+          grep -Eq '^CONFIG_SPI_MASTER=y$' "$KDIR/.config" || {
+            echo "::error::CONFIG_SPI_MASTER is not enabled in the DDK config."
+            exit 1
+          }
 
-      - name: Fetch pinned CH341 USB-SPI driver source
+      - name: Fetch latest upstream Linux CH341 SPI driver
         shell: bash
         run: |
           set -euo pipefail
-          git clone https://github.com/gschorcht/spi-ch341-usb.git "$GITHUB_WORKSPACE/spi-ch341-usb"
-          cd "$GITHUB_WORKSPACE/spi-ch341-usb"
-          git checkout 18b4884945d5243256d0cc46b2b45026c5447f7b
-          test -s spi-ch341-usb.c
-          grep -q 'MODULE_LICENSE' spi-ch341-usb.c
-          echo "Source revision: $(git rev-parse HEAD)"
+          SRC_SHA=84182c48999f856c3865e4a537c244f9569c9f6c
+          SRC="$GITHUB_WORKSPACE/ch341-spi"
+          mkdir -p "$SRC" "$GITHUB_WORKSPACE/out"
+          curl --fail --location --silent --show-error \
+            "https://raw.githubusercontent.com/torvalds/linux/$SRC_SHA/drivers/spi/spi-ch341.c" \
+            --output "$SRC/spi-ch341.c"
+          test -s "$SRC/spi-ch341.c"
+          grep -q 'module_usb_driver(ch341a_usb_driver)' "$SRC/spi-ch341.c"
+          grep -q 'SPI_CONTROLLER_MUST_TX' "$SRC/spi-ch341.c"
+          grep -q 'USB_DEVICE(0x1a86, 0x5512)' "$SRC/spi-ch341.c"
+          echo "$SRC_SHA" | tee "$GITHUB_WORKSPACE/out/upstream-source-commit.txt"
+          echo "Fetched torvalds/linux drivers/spi/spi-ch341.c at $SRC_SHA"
 
-      - name: Adapt legacy SPI/GPIO API for Linux 6.6
+      - name: Build upstream spi-ch341 driver against Android 15 DDK
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/spi-ch341-usb"
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          p = Path("spi-ch341-usb.c")
-          s = p.read_text()
-
-          # Use the modern GPIO descriptor header and SPI controller naming.
-          s = s.replace("#include <linux/gpio.h>", "#include <linux/gpio/driver.h>")
-          s = s.replace("struct spi_master", "struct spi_controller")
-          s = s.replace("spi_master_get_devdata", "spi_controller_get_devdata")
-          s = s.replace("spi_alloc_master", "spi_alloc_host")
-          s = s.replace("spi_register_master", "spi_register_controller")
-          s = s.replace("spi_unregister_master", "spi_unregister_controller")
-          s = s.replace("SPI_MASTER_MUST_RX", "SPI_CONTROLLER_MUST_RX")
-          s = s.replace("SPI_MASTER_MUST_TX", "SPI_CONTROLLER_MUST_TX")
-          s = s.replace("spi->master", "spi->controller")
-          s = s.replace("->master", "->controller")
-
-          # Linux 6.6 removed the old global bus-number lookup. The CH341
-          # adapter owns its controller; allocate it directly rather than
-          # searching for an unrelated pre-existing bus.
-          old = re.compile(
-              r"\s*while\s*\(\(ch341_dev->controller\s*=\s*spi_busnum_to_master\(bus\)\)\)"
-              r"\s*\{.*?\n\s*\}",
-              re.S
-          )
-          s, n = old.subn(
-              "\n    ch341_dev->controller = spi_alloc_host(&ch341_dev->usb_if->dev, "
-              "sizeof(struct ch341_device *));\n"
-              "    if (!ch341_dev->controller)\n"
-              "        return -ENOMEM;",
-              s, count=1
-          )
-          # Fail with a useful diagnostic if the expected legacy block moved.
-          if n != 1:
-              raise SystemExit("could not replace legacy spi_busnum_to_master() loop")
-
-          # The upstream driver uses board-info registration. Linux 6.6 still
-          # supports spi_new_device() for explicitly creating its spidev child.
-          old_call = "spi_register_board_info(ch341_spi_devices, ch341_dev->slave_num);"
-          if old_call in s:
-              new_call = """for (int i = 0; i < ch341_dev->slave_num; i++) {
-                  if (!spi_new_device(ch341_dev->controller, &ch341_spi_devices[i]))
-                      return -ENODEV;
-              }"""
-              s = s.replace(old_call, new_call, 1)
-
-          p.write_text(s)
-          PY
-
-      - name: Build module against Android 15 DDK
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC="$GITHUB_WORKSPACE/spi-ch341-usb"
+          SRC="$GITHUB_WORKSPACE/ch341-spi"
           OUT="$GITHUB_WORKSPACE/out"
-          mkdir -p "$OUT"
-          cat > "$SRC/Makefile" <<'EOF'
-          obj-m += spi-ch341-usb.o
-          EOF
-          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
+          printf 'obj-m += spi-ch341.o\n' > "$SRC/Makefile"
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
-          test -s "$SRC/spi-ch341-usb.ko"
-          install -m 0644 "$SRC/spi-ch341-usb.ko" "$OUT/spi-ch341-usb.ko"
+          test -s "$SRC/spi-ch341.ko"
+          install -m 0644 "$SRC/spi-ch341.ko" "$OUT/spi-ch341.ko"
 
       - name: Validate module metadata and ARM64 ELF
         shell: bash
         run: |
           set -euo pipefail
-          file out/spi-ch341-usb.ko
-          modinfo out/spi-ch341-usb.ko | tee out/modinfo.txt
-          modinfo -F vermagic out/spi-ch341-usb.ko | tee out/module-vermagic.txt
-          llvm-readelf -h out/spi-ch341-usb.ko | grep -E 'Class:|Machine:'
-          grep -Eq 'Machine:.*AArch64' < <(llvm-readelf -h out/spi-ch341-usb.ko)
+          file out/spi-ch341.ko
+          modinfo out/spi-ch341.ko | tee out/modinfo.txt
+          test "$(modinfo -F name out/spi-ch341.ko)" = "spi-ch341"
+          modinfo -F vermagic out/spi-ch341.ko | tee out/module-vermagic.txt
+          modinfo -F alias out/spi-ch341.ko | tee out/module-aliases.txt
+          grep -qi 'v1A86p5512' out/module-aliases.txt
+          llvm-readelf -h out/spi-ch341.ko | grep -E 'Class:|Machine:'
+          grep -Eq 'Machine:.*AArch64' < <(llvm-readelf -h out/spi-ch341.ko)
           {
-            echo "Driver: CH341 USB-to-SPI and GPIO adapter."
-            echo "Source: https://github.com/gschorcht/spi-ch341-usb"
-            echo "Pinned source: 18b4884945d5243256d0cc46b2b45026c5447f7b"
-            echo "DDK: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Driver: upstream Linux CH341A USB-to-SPI controller."
+            echo "Source: torvalds/linux drivers/spi/spi-ch341.c"
+            echo "Source commit: $(cat out/upstream-source-commit.txt)"
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
             echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-            echo "Build/package only; no device installation or module loading."
-            echo "The DDK 6.6.127 build is not the phone's exact 6.6.118 build."
-            echo "Check vermagic, symbol CRCs, dependencies and exported symbols before loading."
+            echo "This is a build/package artifact; it is not installed or loaded on a phone."
+            echo "The DDK build tree is not guaranteed to match the phone's exact 6.6.118 config, vermagic or symbol CRCs."
+            echo "The driver registers an SPI controller. A userspace spidev binding is a separate kernel/device configuration step."
           } | tee out/README.txt
-          sha256sum out/spi-ch341-usb.ko | tee out/SHA256SUMS
+          sha256sum out/spi-ch341.ko | tee out/SHA256SUMS
 
       - name: Upload CH341 SPI module artifact
         uses: actions/upload-artifact@v4
         with:
-          name: spi-ch341-usb-android15-6.6
+          name: spi-ch341-android15-6.6
           path: out/
           if-no-files-found: error
           retention-days: 14
