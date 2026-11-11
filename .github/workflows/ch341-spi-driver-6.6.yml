@@ -28,18 +28,9 @@ jobs:
           echo "KDIR=$KDIR"
           echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
           grep -E '^CONFIG_(USB|SPI|GPIOLIB)=' "$KDIR/.config" | sort || true
-          grep -Eq '^CONFIG_USB=(y|m)$' "$KDIR/.config" || {
-            echo "::error::USB host support is not enabled in the DDK config."
-            exit 1
-          }
-          grep -Eq '^CONFIG_SPI=(y|m)$' "$KDIR/.config" || {
-            echo "::error::SPI framework is not enabled in the DDK config."
-            exit 1
-          }
-          grep -Eq '^CONFIG_GPIOLIB=(y|m)$' "$KDIR/.config" || {
-            echo "::error::GPIO library support is not enabled in the DDK config."
-            exit 1
-          }
+          grep -Eq '^CONFIG_USB=(y|m)$' "$KDIR/.config"
+          grep -Eq '^CONFIG_SPI=(y|m)$' "$KDIR/.config"
+          grep -Eq '^CONFIG_GPIOLIB=(y|m)$' "$KDIR/.config"
 
       - name: Fetch pinned CH341 USB-SPI driver source
         shell: bash
@@ -48,100 +39,101 @@ jobs:
           git clone https://github.com/gschorcht/spi-ch341-usb.git "$GITHUB_WORKSPACE/spi-ch341-usb"
           cd "$GITHUB_WORKSPACE/spi-ch341-usb"
           git checkout 18b4884945d5243256d0cc46b2b45026c5447f7b
-          echo "Driver source revision: $(git rev-parse HEAD)"
           test -s spi-ch341-usb.c
           grep -q 'MODULE_LICENSE' spi-ch341-usb.c
+          echo "Source revision: $(git rev-parse HEAD)"
 
-      - name: Adapt legacy SPI and GPIO APIs for Linux 6.6
+      - name: Adapt legacy SPI/GPIO API for Linux 6.6
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/spi-ch341-usb"
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
           p = Path("spi-ch341-usb.c")
           s = p.read_text()
 
-          # Linux 6.x uses struct spi_controller and spi_controller APIs.
+          # Use the modern GPIO descriptor header and SPI controller naming.
           s = s.replace("#include <linux/gpio.h>", "#include <linux/gpio/driver.h>")
-          s = s.replace("struct spi_master*", "struct spi_controller*")
+          s = s.replace("struct spi_master", "struct spi_controller")
           s = s.replace("spi_master_get_devdata", "spi_controller_get_devdata")
-          s = s.replace("spi_master_put", "spi_controller_put")
-          s = s.replace("spi_master", "spi_controller")
           s = s.replace("spi_alloc_master", "spi_alloc_host")
           s = s.replace("spi_register_master", "spi_register_controller")
           s = s.replace("spi_unregister_master", "spi_unregister_controller")
-          s = s.replace("spi_busnum_to_controller", "spi_busnum_to_master")
           s = s.replace("SPI_MASTER_MUST_RX", "SPI_CONTROLLER_MUST_RX")
           s = s.replace("SPI_MASTER_MUST_TX", "SPI_CONTROLLER_MUST_TX")
-          s = s.replace("->master", "->controller")
-          s = s.replace(".master", ".controller")
           s = s.replace("spi->master", "spi->controller")
+          s = s.replace("->master", "->controller")
 
-          # spi_busnum_to_master() was removed; this old driver only uses
-          # the returned controller for a legacy board-info scan. Use the
-          # controller allocated for this USB device directly instead.
-          old = """    while ((ch341_dev->master = spi_busnum_to_master(bus)))
-    {
-        if (ch341_dev->master->bus_num == bus)
-            break;
-        spi_controller_put(ch341_dev->master);
-        ch341_dev->master = NULL;
-        bus++;
-    }"""
-          new = """    ch341_dev->master = spi_alloc_host(&ch341_dev->usb_if->dev,
-                                      sizeof(struct ch341_device *));
-    if (!ch341_dev->master)
-        return -ENOMEM;"""
-          if old in s:
-              s = s.replace(old, new, 1)
-          # Keep remaining controller ownership and registration consistent.
-          s = s.replace("spi_alloc_host(&ch341_dev->usb_dev->dev, sizeof(struct ch341_device*))",
-                        "spi_alloc_host(&ch341_dev->usb_if->dev, sizeof(struct ch341_device *))")
+          # Linux 6.6 removed the old global bus-number lookup. The CH341
+          # adapter owns its controller; allocate it directly rather than
+          # searching for an unrelated pre-existing bus.
+          old = re.compile(
+              r"\s*while\s*\(\(ch341_dev->controller\s*=\s*spi_busnum_to_master\(bus\)\)\)"
+              r"\s*\{.*?\n\s*\}",
+              re.S
+          )
+          s, n = old.subn(
+              "\n    ch341_dev->controller = spi_alloc_host(&ch341_dev->usb_if->dev, "
+              "sizeof(struct ch341_device *));\n"
+              "    if (!ch341_dev->controller)\n"
+              "        return -ENOMEM;",
+              s, count=1
+          )
+          # Fail with a useful diagnostic if the expected legacy block moved.
+          if n != 1:
+              raise SystemExit("could not replace legacy spi_busnum_to_master() loop")
 
-          # Linux 6.6 removed legacy SPI board-info registration helpers.
-          # The SPI controller's cs_gpios / native CS handles its children;
-          # register spidev children explicitly after controller registration.
-          s = s.replace("spi_register_board_info(ch341_spi_devices, ch341_dev->slave_num);",
-                        "/* SPI child devices are created below with spi_new_device(). */")
-          # Replace board-info registration with direct SPI child creation after master registration.
-          # This targeted transformation is validated by the build and source checks.
+          # The upstream driver uses board-info registration. Linux 6.6 still
+          # supports spi_new_device() for explicitly creating its spidev child.
+          old_call = "spi_register_board_info(ch341_spi_devices, ch341_dev->slave_num);"
+          if old_call in s:
+              new_call = """for (int i = 0; i < ch341_dev->slave_num; i++) {
+                  if (!spi_new_device(ch341_dev->controller, &ch341_spi_devices[i]))
+                      return -ENODEV;
+              }"""
+              s = s.replace(old_call, new_call, 1)
+
           p.write_text(s)
           PY
 
-      - name: Build and validate CH341 USB-SPI module
+      - name: Build module against Android 15 DDK
         shell: bash
         run: |
           set -euo pipefail
           SRC="$GITHUB_WORKSPACE/spi-ch341-usb"
           OUT="$GITHUB_WORKSPACE/out"
           mkdir -p "$OUT"
-
           cat > "$SRC/Makefile" <<'EOF'
           obj-m += spi-ch341-usb.o
           EOF
-
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 clean
           make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
-
           test -s "$SRC/spi-ch341-usb.ko"
           install -m 0644 "$SRC/spi-ch341-usb.ko" "$OUT/spi-ch341-usb.ko"
-          file "$OUT/spi-ch341-usb.ko"
-          modinfo "$OUT/spi-ch341-usb.ko" | tee "$OUT/modinfo.txt"
-          modinfo -F vermagic "$OUT/spi-ch341-usb.ko" | tee "$OUT/module-vermagic.txt"
-          llvm-readelf -h "$OUT/spi-ch341-usb.ko" | grep -E 'Class:|Machine:'
-          grep -Eq 'Machine:.*AArch64' < <(llvm-readelf -h "$OUT/spi-ch341-usb.ko")
+
+      - name: Validate module metadata and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/spi-ch341-usb.ko
+          modinfo out/spi-ch341-usb.ko | tee out/modinfo.txt
+          modinfo -F vermagic out/spi-ch341-usb.ko | tee out/module-vermagic.txt
+          llvm-readelf -h out/spi-ch341-usb.ko | grep -E 'Class:|Machine:'
+          grep -Eq 'Machine:.*AArch64' < <(llvm-readelf -h out/spi-ch341-usb.ko)
           {
             echo "Driver: CH341 USB-to-SPI and GPIO adapter."
             echo "Source: https://github.com/gschorcht/spi-ch341-usb"
-            echo "Pinned source revision: 18b4884945d5243256d0cc46b2b45026c5447f7b"
-            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "Pinned source: 18b4884945d5243256d0cc46b2b45026c5447f7b"
+            echo "DDK: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
             echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
-            echo "Build/package only; this workflow does not install or load the module."
-            echo "Review the driver's device registration and test with the exact adapter/kernel before use."
-            echo "The DDK kernel is not the phone's exact 6.6.118 build; check vermagic and symbol CRCs."
-          } | tee "$OUT/README.txt"
-          sha256sum "$OUT/spi-ch341-usb.ko" | tee "$OUT/SHA256SUMS"
+            echo "Build/package only; no device installation or module loading."
+            echo "The DDK 6.6.127 build is not the phone's exact 6.6.118 build."
+            echo "Check vermagic, symbol CRCs, dependencies and exported symbols before loading."
+          } | tee out/README.txt
+          sha256sum out/spi-ch341-usb.ko | tee out/SHA256SUMS
 
       - name: Upload CH341 SPI module artifact
         uses: actions/upload-artifact@v4
