@@ -78,7 +78,7 @@ jobs:
           set -euo pipefail
           file out/spi-ch341.ko
           modinfo out/spi-ch341.ko | tee out/modinfo.txt
-          test "$(modinfo -F name out/spi-ch341.ko)" = "spi-ch341"
+          test "$(modinfo -F name out/spi-ch341.ko)" = "spi_ch341"
           modinfo -F vermagic out/spi-ch341.ko | tee out/module-vermagic.txt
           modinfo -F alias out/spi-ch341.ko | tee out/module-aliases.txt
           grep -qi 'v1A86p5512' out/module-aliases.txt
