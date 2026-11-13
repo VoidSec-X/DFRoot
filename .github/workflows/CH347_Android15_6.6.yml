@@ -57,6 +57,33 @@ jobs:
           grep -q 'obj-m += mfd-ch347.o' "$SRC/Makefile"
           grep -q 'obj-m += spi-ch347.o' "$SRC/Makefile"
 
+          # Linux 6.6 platform_driver.remove uses the void callback API.
+          # Upstream CH347 currently declares this callback as int; adapt all
+          # three platform drivers to the target kernel's remove_new API.
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import re, sys
+          root = Path(sys.argv[1])
+          for filename, callback in (
+              ("spi-ch347.c", "ch347_spi_remove"),
+              ("i2c-ch347.c", "ch347_i2c_remove"),
+              ("gpio-ch347.c", "ch347_gpio_remove"),
+          ):
+              path = root / filename
+              text = path.read_text()
+              # The callback itself must remain int-returning for kernels using
+              # .remove; use .remove_new where the 6.6 API provides it.
+              old = f".remove\\t= {callback},"
+              if old in text:
+                  text = text.replace(old, f".remove_new\\t= {callback},", 1)
+              else:
+                  pattern = rf"\\.remove\\s*=\\s*{callback}\\s*,"
+                  text, count = re.subn(pattern, f".remove_new = {callback},", text, count=1)
+                  if count != 1 and f".remove_new = {callback}," not in text:
+                      raise SystemExit(f"{filename}: cannot patch {callback} registration")
+              path.write_text(text)
+          PY
+
       - name: Build all four CH347 kernel modules
         shell: bash
         run: |
