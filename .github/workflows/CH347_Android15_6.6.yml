@@ -57,8 +57,8 @@ jobs:
           grep -q 'obj-m += mfd-ch347.o' "$SRC/Makefile"
           grep -q 'obj-m += spi-ch347.o' "$SRC/Makefile"
 
-          # Android 15's 6.6 platform_driver uses .remove_new for int callbacks.
-          # Convert the three int-returning upstream remove callbacks to .remove_new.
+          # Upstream source is written for older platform_driver APIs.
+          # Linux 6.6 uses .remove_new for callbacks returning int.
           python3 - "$SRC" <<'PY'
           from pathlib import Path
           import re, sys
@@ -71,13 +71,10 @@ jobs:
           for filename, callback in callbacks.items():
               path = root / filename
               source = path.read_text()
-              pattern = re.compile(r"(\\.remove)\\s*(=)\\s*(" + re.escape(callback) + r")\\s*(,)")
-              source, count = pattern.subn(r".remove_new = \\3,", source, count=1)
+              pattern = re.compile(r"\\.remove\\s*=\\s*" + re.escape(callback) + r"\\s*,")
+              source, count = pattern.subn(".remove_new = " + callback + ",", source, count=1)
               if count != 1:
-                  if re.search(r"\\.remove_new\\s*=\\s*" + re.escape(callback), source):
-                      print(f"{filename}: already patched")
-                  else:
-                      raise SystemExit(f"{filename}: expected one .remove registration for {callback}; found {count}")
+                  raise SystemExit(f"{filename}: expected one .remove assignment for {callback}; found {count}")
               path.write_text(source)
           PY
 
