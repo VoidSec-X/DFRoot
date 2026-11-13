@@ -57,27 +57,58 @@ jobs:
           grep -q 'obj-m += mfd-ch347.o' "$SRC/Makefile"
           grep -q 'obj-m += spi-ch347.o' "$SRC/Makefile"
 
-          # The callbacks return int. Linux 6.6's platform_driver uses
-          # .remove_new for this signature. Match the exact upstream spelling
-          # (.remove = callback) and fail with source context if upstream changes.
+          # Android 6.6's platform_driver.remove callback returns int.
+          # Upstream CH347 uses void callbacks; adapt the three platform
+          # remove functions and return 0 after their existing cleanup.
           python3 - "$SRC" <<'PY'
           from pathlib import Path
-          import re, sys
+          import sys
+
           root = Path(sys.argv[1])
           callbacks = {
               "spi-ch347.c": "ch347_spi_remove",
               "i2c-ch347.c": "ch347_i2c_remove",
               "gpio-ch347.c": "ch347_gpio_remove",
           }
+
           for filename, callback in callbacks.items():
               path = root / filename
               source = path.read_text()
-              pattern = re.compile(r"(?m)(\\.remove)\\s*(=)\\s*(" + re.escape(callback) + r")(\\s*,)")
-              source, count = pattern.subn(r".remove_new = \\3,", source, count=1)
-              if count != 1:
-                  context = [line.strip() for line in source.splitlines() if callback in line]
-                  raise SystemExit(f"{filename}: expected one remove registration for {callback}, found {count}; matches={context}")
+              old_signature = f"static void {callback}(struct platform_device *pdev)"
+              new_signature = f"static int {callback}(struct platform_device *pdev)"
+              if source.count(old_signature) != 1:
+                  raise SystemExit(
+                      f"{filename}: expected exactly one upstream callback signature "
+                      f"{old_signature!r}; got {source.count(old_signature)}"
+                  )
+              source = source.replace(old_signature, new_signature, 1)
+
+              body_start = source.find("{", source.find(new_signature))
+              if body_start < 0:
+                  raise SystemExit(f"{filename}: opening brace not found for {callback}")
+              depth = 0
+              body_end = -1
+              for index in range(body_start, len(source)):
+                  if source[index] == "{":
+                      depth += 1
+                  elif source[index] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          body_end = index
+                          break
+              if body_end < 0:
+                  raise SystemExit(f"{filename}: unterminated body for {callback}")
+
+              body = source[body_start + 1:body_end]
+              if "return 0;" not in body:
+                  body = body.rstrip() + "\n\treturn 0;\n"
+                  source = source[:body_start + 1] + body + source[body_end:]
+
+              if f".remove" not in source or callback not in source:
+                  raise SystemExit(f"{filename}: callback registration missing after patch")
               path.write_text(source)
+              print(f"Patched {filename}: {callback} now returns int")
+
           PY
 
       - name: Build all four CH347 kernel modules
