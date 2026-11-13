@@ -109,6 +109,16 @@ jobs:
               path.write_text(source)
               print(f"Patched {filename}: {callback} now returns int")
 
+          # The Android 15 6.6 DDK represents spi_device.chip_select as a
+          # scalar (the upstream revision uses the newer array form).
+          spi_path = root / "spi-ch347.c"
+          spi_source = spi_path.read_text()
+          old = "spi->chip_select[0]"
+          if spi_source.count(old) != 1:
+              raise SystemExit(f"spi-ch347.c: expected one {old!r} access")
+          spi_path.write_text(spi_source.replace(old, "spi->chip_select", 1))
+          print("Patched SPI chip-select access for the target 6.6 struct spi_device")
+
           PY
 
       - name: Build all four CH347 kernel modules
