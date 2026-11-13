@@ -1,0 +1,186 @@
+name: Build CH347 USB-SPI-I2C-GPIO Drivers (Android 15 GKI 6.6)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/CH347_Android15_6.6.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build CH347 modules / Android 15 6.6
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    container:
+      image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+
+    steps:
+      - name: Check DDK environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${KDIR:-}" && test -f "$KDIR/Makefile" || {
+            echo "::error::KDIR is missing or is not a kernel build tree."
+            exit 1
+          }
+          test -s "$KDIR/.config"
+          echo "KDIR=$KDIR"
+          echo "Kernel release: $(make -s -C "$KDIR" kernelrelease)"
+          grep -E '^CONFIG_(USB|MFD_CORE|SPI|SPI_MASTER|I2C|GPIOLIB)=' "$KDIR/.config" | sort || true
+          for option in CONFIG_USB CONFIG_MFD_CORE CONFIG_SPI CONFIG_SPI_MASTER CONFIG_I2C CONFIG_GPIOLIB; do
+            grep -Eq "^$option=(y|m)$" "$KDIR/.config" || {
+              echo "::error::$option is not enabled in the DDK kernel config."
+              exit 1
+            }
+          done
+
+      - name: Fetch CH347 Linux driver source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/ch347_vcp"
+          mkdir -p "$SRC" "$GITHUB_WORKSPACE/out"
+          git clone --depth=1 https://github.com/aystarik/ch347_vcp.git "$SRC"
+          git -C "$SRC" rev-parse HEAD | tee "$GITHUB_WORKSPACE/out/upstream-source-commit.txt"
+          test -s "$SRC/Makefile"
+          for source in mfd-ch347.c spi-ch347.c i2c-ch347.c gpio-ch347.c ch347.h; do
+            test -s "$SRC/$source" || {
+              echo "::error::Missing upstream source: $source"
+              exit 1
+            }
+          done
+          grep -q 'CH347_USB_DEVICE_M1 0x55db' "$SRC/mfd-ch347.c"
+          grep -q 'CH347_USB_DEVICE_M3 0x55dd' "$SRC/mfd-ch347.c"
+          grep -q 'obj-m += mfd-ch347.o' "$SRC/Makefile"
+          grep -q 'obj-m += spi-ch347.o' "$SRC/Makefile"
+
+          # Android 6.6's platform_driver.remove callback returns int.
+          # Upstream CH347 uses void callbacks; adapt the three platform
+          # remove functions and return 0 after their existing cleanup.
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          callbacks = {
+              "spi-ch347.c": "ch347_spi_remove",
+              "i2c-ch347.c": "ch347_i2c_remove",
+              "gpio-ch347.c": "ch347_gpio_remove",
+          }
+
+          for filename, callback in callbacks.items():
+              path = root / filename
+              source = path.read_text()
+              old_signature = f"static void {callback}(struct platform_device *pdev)"
+              new_signature = f"static int {callback}(struct platform_device *pdev)"
+              if source.count(old_signature) != 1:
+                  raise SystemExit(
+                      f"{filename}: expected exactly one upstream callback signature "
+                      f"{old_signature!r}; got {source.count(old_signature)}"
+                  )
+              source = source.replace(old_signature, new_signature, 1)
+
+              body_start = source.find("{", source.find(new_signature))
+              if body_start < 0:
+                  raise SystemExit(f"{filename}: opening brace not found for {callback}")
+              depth = 0
+              body_end = -1
+              for index in range(body_start, len(source)):
+                  if source[index] == "{":
+                      depth += 1
+                  elif source[index] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          body_end = index
+                          break
+              if body_end < 0:
+                  raise SystemExit(f"{filename}: unterminated body for {callback}")
+
+              body = source[body_start + 1:body_end]
+              if "return 0;" not in body:
+                  body = body.rstrip() + "\n\treturn 0;\n"
+                  source = source[:body_start + 1] + body + source[body_end:]
+
+              if f".remove" not in source or callback not in source:
+                  raise SystemExit(f"{filename}: callback registration missing after patch")
+              path.write_text(source)
+              print(f"Patched {filename}: {callback} now returns int")
+
+          # The Android 15 6.6 DDK represents spi_device.chip_select as a
+          # scalar (the upstream revision uses the newer array form).
+          spi_path = root / "spi-ch347.c"
+          spi_source = spi_path.read_text()
+          old = "spi->chip_select[0]"
+          if spi_source.count(old) != 1:
+              raise SystemExit(f"spi-ch347.c: expected one {old!r} access")
+          spi_path.write_text(spi_source.replace(old, "spi->chip_select", 1))
+          print("Patched SPI chip-select access for the target 6.6 struct spi_device")
+
+          PY
+
+      - name: Build all four CH347 kernel modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/ch347_vcp"
+          OUT="$GITHUB_WORKSPACE/out"
+          make -C "$KDIR" M="$SRC" ARCH=arm64 LLVM=1 modules V=1
+          for module in mfd-ch347.ko spi-ch347.ko i2c-ch347.ko gpio-ch347.ko; do
+            test -s "$SRC/$module" || {
+              echo "::error::Build did not produce $module"
+              exit 1
+            }
+            install -m 0644 "$SRC/$module" "$OUT/$module"
+          done
+
+      - name: Validate module metadata, USB IDs and ARM64 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in out/*.ko; do
+            echo "===== $module ====="
+            file "$module"
+            modinfo "$module" | tee "$module.modinfo.txt"
+            modinfo -F vermagic "$module" | tee -a out/module-vermagic.txt
+            llvm-readelf -h "$module" | grep -E 'Class:|Machine:'
+            llvm-readelf -h "$module" | grep -q 'AArch64'
+          done
+
+          # CH347 hardware modes have different USB product IDs:
+          # Mode 1 = 1a86:55db; Mode 3 = 1a86:55dd.
+          grep -qi 'v1A86p55DB' out/mfd-ch347.ko.modinfo.txt
+          grep -qi 'v1A86p55DD' out/mfd-ch347.ko.modinfo.txt
+
+          # Confirm the expected module names and dependencies are present.
+          for name in mfd_ch347 spi_ch347 i2c_ch347 gpio_ch347; do
+            grep -Rqi "name: *$name" out/*.modinfo.txt || {
+              echo "::error::Missing module metadata for $name"
+              exit 1
+            }
+          done
+
+          {
+            echo "CH347 USB bridge driver set: mfd-ch347, spi-ch347, i2c-ch347, gpio-ch347."
+            echo "Upstream: https://github.com/aystarik/ch347_vcp"
+            echo "Upstream commit: $(cat out/upstream-source-commit.txt)"
+            echo "Build image: ghcr.io/ylarod/ddk-min:android15-6.6-20260828"
+            echo "DDK kernel release: $(make -s -C "$KDIR" kernelrelease)"
+            echo "USB IDs validated from upstream source: 1a86:55db (Mode 1), 1a86:55dd (Mode 3)."
+            echo "This workflow builds and packages modules only; it does not load them on a phone."
+            echo "The DDK image's vermagic/config/symbol CRCs may differ from the device's exact kernel build."
+            echo "Check module dependencies, kernel config and symbol versions before loading."
+            echo "SPI driver registers a Linux SPI controller. Create a SPI child and bind spidev separately if userspace spidev access is desired."
+          } | tee out/README.txt
+
+          sha256sum out/*.ko | tee out/SHA256SUMS
+
+      - name: Upload CH347 module bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch347-android15-6.6
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
