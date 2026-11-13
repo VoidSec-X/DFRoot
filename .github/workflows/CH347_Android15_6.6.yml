@@ -57,8 +57,9 @@ jobs:
           grep -q 'obj-m += mfd-ch347.o' "$SRC/Makefile"
           grep -q 'obj-m += spi-ch347.o' "$SRC/Makefile"
 
-          # Upstream source is written for older platform_driver APIs.
-          # Linux 6.6 uses .remove_new for callbacks returning int.
+          # The callbacks return int. Linux 6.6's platform_driver uses
+          # .remove_new for this signature. Match the exact upstream spelling
+          # (.remove = callback) and fail with source context if upstream changes.
           python3 - "$SRC" <<'PY'
           from pathlib import Path
           import re, sys
@@ -71,10 +72,11 @@ jobs:
           for filename, callback in callbacks.items():
               path = root / filename
               source = path.read_text()
-              pattern = re.compile(r"\\.remove\\s*=\\s*" + re.escape(callback) + r"\\s*,")
-              source, count = pattern.subn(".remove_new = " + callback + ",", source, count=1)
+              pattern = re.compile(r"(?m)(\\.remove)\\s*(=)\\s*(" + re.escape(callback) + r")(\\s*,)")
+              source, count = pattern.subn(r".remove_new = \\3,", source, count=1)
               if count != 1:
-                  raise SystemExit(f"{filename}: expected one .remove assignment for {callback}; found {count}")
+                  context = [line.strip() for line in source.splitlines() if callback in line]
+                  raise SystemExit(f"{filename}: expected one remove registration for {callback}, found {count}; matches={context}")
               path.write_text(source)
           PY
 
